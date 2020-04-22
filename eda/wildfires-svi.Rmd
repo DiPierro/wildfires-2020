@@ -1,0 +1,357 @@
+---
+title: Wildfires + SVI
+author: Amy DiPierro
+date: "`r Sys.Date()`"
+output: 
+  github_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Libraries
+library(tidyverse)
+library(sf)
+
+# Parameters
+
+# SVI Data
+# Source: https://svi.cdc.gov/data-and-tools-download.html
+# Download date: 2020-04-21
+# Geography: United States
+# Year: 2018
+file_svi <- here::here("data-raw", "SVI2018_US", "SVI2018_US_tract.shp")
+
+# Monitoring Trends in Burn Severity: Burned Areas Boundary Dataset
+# Source: https://www.mtbs.gov/direct-download
+# Download date: 2020-04-21
+# Geography: United States
+# Years: 2006 - 2017
+file_fires <- here::here("data-raw", "mtbs_perimeter_data", "mtbs_perims_DD.shp")
+
+#===============================================================================
+
+# Code
+
+# Read in the SVI data
+svi <- 
+  read_sf(file_svi)
+
+# Read in the fire shapefile data
+fires <-
+  read_sf(file_fires)
+
+# States
+us <-
+  ussf::boundaries(
+    geography = "state", 
+    projection = "longlat",
+  ) %>% 
+  filter(!NAME %in% c("Alaska", "Hawaii"))
+
+```
+
+# Checking basic fields
+
+## Fires
+
+First, let's see how many different kinds of fire are in this data:
+
+```{r}
+fires %>% 
+  st_set_geometry(NULL) %>% 
+  count(Fire_Type)
+```
+
+Here are the definitions of those fire types, according to the MTBS documentation:
+
+* Wildfire - An unplanned, unwanted wildland fire including unauthorized human-caused fires, escaped wildland fire use events, escaped prescribed fire projects, and all other wildland fires where the objective is to put the fire out (definition currently under NWCG review).
+
+* Prescribed Fire - Any fire intentionally ignited by management actions in accordance with applicable laws, policies, and regulations to meet specific objectives.
+
+* Wildland Fire Use - An event dealing with the management of a naturally ignited wildland fire to accomplish specific prestated resource management objectives in predefined geographic areas outlined in the Fire Management Plans.
+
+* Unknown - A fire event whose incident type was not reported from the original reporting agency.
+
+* Complex - Two or more individual incidents located in the same general area which are assigned to a single incident commander or unified command.
+
+* Out of Area Response - Multiple resource response to a wildfire incident. This term applies exclusively to wildfire incidents.
+
+Let's see which years had the most unique fires:
+
+```{r}
+fires %>% 
+  st_set_geometry(NULL) %>% 
+  count(Year) %>% 
+  ggplot() +
+  geom_col(aes(x = Year, y = n))
+```
+
+How about the annual acreage burned?
+
+```{r}
+fires %>% 
+  st_set_geometry(NULL) %>% 
+  group_by(Year) %>% 
+  summarize(total_acreage = sum(Acres, na.rm = TRUE)) %>% 
+  ggplot() +
+  geom_col(aes(x = Year, y = total_acreage))
+```
+
+## SVI
+
+Per the documentation, the key metric here is RPL_THEMES -- this is the overall relative score of a Census tract's vulnerability, where numbers closer to 1 are more vulnerable and numbers closer to 0 are the least vulnerable. Please note that RPL_THEMES uses flags such that:
+
+* tracts in the top 10% of vulnerability are coded as 1 -- these are the most vulnerable
+* tracts below the 90th percentile of vulnerability are coded as 0 -- these are the least vulnerable
+* not enough people = -999
+
+```{r}
+svi %>% 
+  st_set_geometry(NULL) %>%
+  filter(RPL_THEMES > -999) %>% 
+  ggplot() +
+  geom_boxplot(aes(y = RPL_THEMES))
+```
+
+
+# Data preparation
+
+Let's keep just the incidents denoted as Wildfire, Complex or Out of Area Response. And let's filter to the five years around 2010. It will be easier to see when vulnerable places and adjacent less-vulnerable places are hit by fire(s) around the same time if we limit the time period. 
+
+A Ph.D. student acquaintance studying wildfire recovery told me that it typically takes about 10 years for communities to fully recover from a bad fire, which is why I've chosen this period. Given that there were many fires reported in 2011, perhaps it's more likely that some of these overlap particularly vulnerable or invulnerable communities.
+
+But, certainly, we should explore more recent fires, too.
+
+```{r}
+fire_types <- c("Wildfire", "Complex", "Out of Area Response")
+
+fires_filtered <-
+  fires %>% 
+  filter(
+    Fire_Type %in% fire_types,
+    Year %in% c(2008, 2009, 2010, 2011, 2012)
+  )
+```
+
+Let's pull out the most-vulnerable and least vulnerable places. Arbitrarily, I'll set these thresholds:
+
+```{r}
+high_vulnerability <-
+  svi %>% 
+  filter(RPL_THEMES >= 0.9)
+
+low_vulnerability <-
+  svi %>% 
+  filter(RPL_THEMES <= 0.1)
+```
+
+Now, I'll find the intersection between fire perimeters and high/low vulnerability places. For now, I exclude HI and AK for the purpose of mapping. We'll want to look at AK on its own, though.
+
+```{r}
+high_vulnerability_fires <-
+  fires_filtered %>% 
+  st_intersection(high_vulnerability) %>% 
+  filter(!ST_ABBR %in% c("AK", "HI"))
+
+low_vulnerability_fires <-
+  fires_filtered %>% 
+  st_intersection(low_vulnerability) %>% 
+  filter(!ST_ABBR %in% c("AK", "HI"))
+```
+
+# Mapping
+
+The following map helps us to identify vulnerable places and adjacent less-vulnerable places that overlap fire perimeters in this five-year period:
+
+```{r}
+us %>% 
+  ggplot() +
+  geom_sf() +
+  geom_sf(data = high_vulnerability_fires, color = "red") +
+  geom_sf(data = low_vulnerability_fires, color = "blue") +
+  theme_void() +
+  labs(title = "Fires in vulnerable places: 2008 - 2012")
+```
+
+### Utah
+
+Let's zoom in on Utah:
+
+```{r}
+fires_filtered %>% 
+  filter(str_starts(Fire_ID, "UT")) %>% 
+  ggplot() +
+  geom_sf(data = us %>% filter(NAME == "Utah")) +
+  geom_sf(data = high_vulnerability_fires %>% filter (ST_ABBR == "UT"), color = "red") +
+  geom_sf(data = low_vulnerability_fires %>% filter (ST_ABBR == "UT"), color = "blue") +
+  coord_sf(xlim = c(-113.303, -111.806), ylim = c(40.627, 41.211))
+```
+
+Looks to me like these are high vulnerability and low vulnerability places in Tooele County:
+
+```{r}
+high_vulnerability_fires %>% 
+  filter (ST_ABBR == "UT") 
+```
+
+https://censusreporter.org/profiles/05000US49045-tooele-county-ut/ 
+
+This is the fire in the low-vulnerability area:
+
+```{r}
+low_vulnerability_fires %>% 
+  filter(Fire_Name == "SHANTY CANYON") %>% 
+  ggplot() +
+  geom_sf()
+```
+
+### Los Angeles
+
+There were a bunch of fires in LA and Ventura counties during this period:
+
+```{r}
+ggplot() +
+  geom_sf(
+    data = 
+      high_vulnerability_fires %>% 
+      filter(COUNTY %in% c("Los Angeles", "Ventura")), 
+    color = "red"
+  ) +
+  geom_sf(
+    data = 
+      low_vulnerability_fires %>% 
+      filter(COUNTY %in% c("Los Angeles", "Ventura")), 
+    color = "blue"
+  )
+```
+
+The tiny red dot between the blue areas is a Census tract hit by the 2008 Marek wildfire. 
+
+```{r}
+high_vulnerability_fires %>% 
+      filter(COUNTY %in% c("Los Angeles", "Ventura"))
+```
+
+https://censusreporter.org/profiles/14000US06037104204-census-tract-104204-los-angeles-ca/
+
+### Florida
+
+Check out what's happening in the everglades:
+
+```{r}
+fires_filtered %>% 
+  filter(str_starts(Fire_ID, "FL")) %>% 
+  ggplot() +
+  geom_sf(data = us %>% filter(NAME == "Florida")) +
+  geom_sf(data = high_vulnerability_fires %>% filter(ST_ABBR == "FL"), color = "red") +
+  geom_sf(data = low_vulnerability_fires %>% filter(ST_ABBR == "FL"), color = "blue")
+```
+
+Looks like the big blue (less-vulnerable) fire bordered by the red (vulnerable) perimeter is the Myakka Cutt fire. 
+
+```{r}
+low_vulnerability_fires %>% 
+  filter(COUNTY == "Glades") %>% 
+  arrange(desc(Acres))
+```
+
+https://www.cnn.com/2008/US/05/19/florida.wildfires/index.html 
+
+```{r}
+ggplot() +
+  geom_sf(
+    data = 
+      high_vulnerability_fires %>% 
+      filter(COUNTY %in% c("Glades")), 
+    color = "red"
+  ) +
+  geom_sf(
+    data = 
+      low_vulnerability_fires %>% 
+      filter(COUNTY %in% c("Glades")), 
+    color = "blue"
+  )
+```
+
+# Distance analysis
+
+First, let's find the centroids of the high vulnerability and low vulnerability places we previously identified:
+
+```{r}
+high_centroids <-
+  high_vulnerability %>% 
+  mutate(geometry = st_centroid(geometry))
+
+low_centroids <-
+  low_vulnerability %>% 
+  mutate(geometry = st_centroid(geometry))
+
+```
+
+Now, let's filter to only the centroids that are close to one another:
+
+```{r}
+close_centroids <-
+  st_join(high_centroids, low_centroids, join = st_is_within_distance, dist = 1)
+
+```
+
+Let's see if any of these centroids are within a fire perimeter:
+
+```{r}
+close_fires <- 
+  close_centroids %>% 
+  st_intersection(fires)
+```
+
+```{r}
+close_fires %>% 
+  filter(ST_ABBR.x != "AK") %>% 
+  ggplot() +
+  geom_sf(data = us) +
+  geom_sf(size = 3, shape = 21) 
+  
+```
+
+The problem here is that what we're really picking up here is not adjacent communities hit by a fire the same year, but the same community hit by a fire in different years. 
+
+```{r}
+close_fires %>% 
+  filter(ST_ABBR.x == "CA") %>% 
+  count(COUNTY.x, Year, RPL_THEMES.x, sort = TRUE)
+```
+
+```{r}
+close_fires %>% 
+  count(COUNTY.x, ST_ABBR.x, Year, RPL_THEMES.x) %>% 
+  arrange(desc(RPL_THEMES.x))
+```
+
+Less-close centroids:
+
+```{r}
+less_close_centroids <-
+  st_join(high_centroids, low_centroids, join = st_is_within_distance, dist = 10)
+
+```
+
+Let's see if any of these centroids are within a fire perimeter:
+
+```{r}
+less_close_fires <- 
+  close_centroids %>% 
+  st_intersection(fires)
+```
+
+```{r}
+less_close_fires %>% 
+  filter(ST_ABBR.x != "AK") %>% 
+  ggplot() +
+  geom_sf(data = us) +
+  geom_sf(size = 3, shape = 21) 
+  
+```

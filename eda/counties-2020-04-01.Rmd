@@ -1,0 +1,741 @@
+# Counties: SVI + Karen Short + SIT-209 + Perimeters
+##### Amy DiPierro
+##### `r Sys.Date()`
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Libraries
+library(tidyverse)
+library(sf)
+library(tidycensus)
+library(dbplyr)
+
+# Parameters
+
+## All historical perimeters
+file_geomac <- here::here("data-raw", "US_HIST_FIRE_PERIMTRS_DD83", "US_HIST_FIRE_PERIMTRS_DD83.shp")
+
+## County SVI data
+## Source: https://svi.cdc.gov/data-and-tools-download.html
+## 2000 SVI - only tract level available
+# file_svi_2000 <- here::here("data-raw", "SVI2000_US.csv")
+
+# Source: https://ephtracking.cdc.gov/DataExplorer/?query=779a2b45-2309-4b81-a2d7-8040b78969a0
+## 2010, 2014, 2016
+file_svi_2010_14_16 <- here::here("data-raw", "EPHTN_M604_D_183208", "data_183209.csv")
+
+## 2018 SVI
+file_svi_2018 <- here::here("data-raw", "SVI2018_US_COUNTY", "SVI2018_US_county.shp")
+
+# Monitoring Trends in Burn Severity: Burned Areas Boundary Dataset
+# Source: https://www.mtbs.gov/direct-download
+# Download date: 2020-04-21
+# Geography: United States
+# Years: 2006 - 2017
+file_mtbs <- here::here("data-raw", "mtbs_perimeter_data", "mtbs_perims_DD.shp")
+
+## SIT-209
+file_sit209 <- here::here("data-raw", "wildfires_deduped.csv")
+
+#===============================================================================
+
+# Code
+
+# Read in the SIT-209 data
+sit209 <-
+  file_sit209 %>% 
+  read_csv(
+    col_types = 
+      cols(
+        .default = col_character(),
+        LATITUDE = col_double(),
+        LONGITUDE = col_double(),
+        ESTIMATED_COST = col_double(),
+        REPORT_DATE = col_datetime(format = ""),
+        MAX_PERSONNEL = col_double(),
+        INCIDENT_AREA = col_double(),
+        MAX_SFR_THREAT = col_double(),
+        MAX_MFR_THREAT = col_double(),
+        MAX_MU_THREAT = col_double(),
+        MAX_COMM_THREAT = col_double(),
+        MAX_OUTB_THREAT = col_double(),
+        MAX_OTHER_THREAT = col_double(),
+        SFR_DAMAGED = col_double(),
+        MFR_DAMAGED = col_double(),
+        MU_DAMAGED = col_double(),
+        COMM_DAMAGED = col_double(),
+        OTHER_DAMAGED = col_double(),
+        SFR_DESTROYED = col_double(),
+        MFR_DESTROYED = col_double(),
+        MU_DESTROYED = col_double(),
+        COMM_DESTROYED = col_double(),
+        OUTB_DESTROYED = col_double(),
+        OTHER_DESTROYED = col_double(),
+        INJURIES = col_double(),
+        FATALITIES = col_double(),
+        REPORT_ID = col_character(),
+        WILDFIRE = col_logical(),
+        STATE_FIPS = col_character(),
+        DESTROYED = col_logical(),
+        THREATENED = col_logical(),
+        CLIMATE_REGION = col_character()
+      )
+  )
+
+# Read in the fire shapefile data
+mtbs <-
+  read_sf(file_mtbs)
+
+## Read in the GEOMAC data
+
+geomac <-
+  read_sf(file_geomac)
+
+## Read in the SVI data
+
+svi_2010_14_16 <-
+  read_sf(file_svi_2010_14_16)
+
+svi_2018 <-
+  read_sf(file_svi_2018)
+
+# Connect to Karen Short's database
+# Source: https://www.fs.usda.gov/rds/archive/catalog/RDS-2013-0009.4
+con <-
+  DBI::dbConnect(
+    drv = RSQLite::SQLite(),
+    dbname = here::here("data-raw", "RDS-2013-0009", "Data", "FPA_FOD_20170508.sqlite"),
+  )
+
+# Read the "Fires" table into a dataframe
+karen <- DBI::dbReadTable(con, "Fires")
+
+# Disconect the database
+DBI::dbDisconnect(con)
+
+# Get county geometries
+
+counties <- 
+  ussf::boundaries(geography = c("county"), projection = c("longlat")) %>% 
+  st_transform(crs = 4269)
+
+```
+
+
+# Setup
+
+## Join Karen Short's data to SIT-209
+
+```{r}
+sit_karen <-
+  sit209 %>% 
+  left_join(karen, by = c("INCIDENT_NUMBER" = "ICS_209_INCIDENT_NUMBER")) %>% 
+  drop_na(INCIDENT_NUMBER) %>% 
+  mutate(
+    county_fips = as.character(str_glue("{STATE_FIPS}{FIPS_CODE}")),
+    bin_year = 
+      # TODO: Revisit whether this binning scheme is legitimate
+      case_when(
+        REPORT_YEAR <= 2009 ~ -999,
+        REPORT_YEAR <= 2012 ~ 2010,
+        REPORT_YEAR <= 2014 ~ 2014,
+        REPORT_YEAR <= 2016 ~ 2016,
+        REPORT_YEAR <= 2018 ~ 2018
+      ),
+    year_fips = str_glue("{bin_year}_{county_fips}")
+  )
+```
+
+## Join Karen + SIT-209 to MTBS (OR FIND GEOGRAPHY COLUMN in KAREN)
+
+```{r}
+sit_karen_mtbs <-
+  sit_karen %>% 
+  left_join(mtbs, by = c("MTBS_ID" = "Fire_ID")) 
+  
+```
+
+Let's see how this worked out.
+
+We can see from the following that geometry is the most complete way to join to other data.
+
+```{r}
+sit_karen_mtbs %>% 
+  summarize_all(~ sum(is.na(.))) %>% 
+  select(STATE_FIPS, COUNTY.y, FIPS_CODE, FIPS_NAME, LATITUDE.x, LONGITUDE.x, geometry)
+```
+
+But, then again, FIPS code is generally only missing in the case of fires where we lack lots of other information already, so including records without FIPS_CODE might only have limited added benefit.
+
+```{r}
+sit_karen_mtbs %>% 
+  filter(is.na(FIPS_CODE)) %>% 
+  summarise_all(~ sum(is.na(.)))
+```
+
+```{r}
+sit_karen_mtbs %>% 
+  count(is.na(FIPS_CODE), is.na(COUNTY.x), is.na(COUNTY.y))
+```
+
+
+## Count points in polygon 
+
+* Get centroids of each fire
+
+```{r}
+centroids <-
+  sit_karen_mtbs %>% 
+  mutate(centroid = st_centroid(geometry))
+```
+
+* Join to all county geographies
+
+```{r}
+#TODO: CHECK THAT THIS WORKED
+#TODO: Count the points in the actual polygons
+centroids_counties <-
+  centroids %>% 
+  st_as_sf() %>% 
+  st_join(counties, join = st_within) 
+```
+
+## Summarize fire counts, etc., by county
+
+
+```{r}
+county_summary <-
+  sit_karen_mtbs %>% 
+  select(-Shape) %>% 
+  group_by(county_fips, REPORT_YEAR, year_fips, bin_year) %>% 
+  summarize(
+    county_fires = n(),
+    county_acres = sum(FIRE_SIZE, na.rm = TRUE),
+    county_cost = sum(ESTIMATED_COST, na.rm = TRUE),
+    county_homes_destroyed = sum(SFR_DESTROYED, na.rm = TRUE),
+    county_homes_damaged = sum(SFR_DAMAGED, na.rm = TRUE),
+    county_homes_threatened = sum(MAX_SFR_THREAT, na.rm = TRUE),
+    county_personnel = sum(MAX_PERSONNEL, na.rm = TRUE),
+    county_cost_per_acre = county_cost / county_acres,
+    county_median_acres = median(FIRE_SIZE, na.rm = TRUE),
+    county_median_cost = median(ESTIMATED_COST, na.rm = TRUE),
+    destroyed_count = sum(DESTROYED, na.rm = TRUE),
+    threatened_count = sum(THREATENED, na.rm = TRUE)
+  ) %>% 
+  ungroup() 
+  
+```
+
+
+Note that each record in `county_summary` gives stats for a county in a given year.
+
+## Join Karen + SIT-209 + MTBS to SVI by county. Remember to use the right SVI years
+
+* Prepare the join by combining SVI into one dataframe and adding a new unique ID to join on.
+
+We wrangle the 2018 data first to match the rest of the data.
+
+```{r}
+svi_2018_wrangled <-
+  svi_2018 %>% 
+  mutate(
+    Year = "2018",
+    FIPS = as.double(FIPS),
+    FIPS = as.character(FIPS),
+    year_fips = str_glue("{Year}_{FIPS}")
+  ) %>% 
+  select(
+    "stateFIPS" = ST,
+    "State" = STATE,
+    "countyFIPS" = FIPS,
+    "County" = COUNTY,
+    Year,
+    "Value" = RPL_THEMES,
+    year_fips
+  )
+```
+
+Then we wrangle the rest of the data a little.
+
+```{r}
+svi_10_14_16_wrangled <-
+  svi_2010_14_16 %>% 
+  mutate(
+    countyFIPS = as.double(countyFIPS),
+    countyFIPS = as.character(countyFIPS),
+    year_fips = str_glue("{Year}_{countyFIPS}"),
+    Value = as.double(Value)
+  ) %>% 
+  select(-`Data Comment`, -field_8) 
+```
+
+Now we can combine the two.
+
+```{r}
+svi <-
+  svi_10_14_16_wrangled %>% 
+  bind_rows(svi_2018_wrangled) %>% 
+  select(-geometry)
+```
+
+* FInally, join to the fires data
+
+```{r}
+fires_svi <-
+  county_summary %>%
+  filter(bin_year != -999) %>% 
+  mutate(year_fips = as.character(year_fips)) %>% 
+  left_join(svi, by = c("year_fips"))
+```
+
+
+## Bin counties by SVI
+
+```{r}
+fires_svi_binned <-
+ fires_svi %>%  
+  mutate(
+    bucket =
+      case_when(
+        Value == 1 ~ 1,
+        Value > 0.95 ~ 0.95,
+        Value > 0.9 ~ 0.9,
+        Value > 0.85 ~ 0.85,
+        Value > 0.8 ~ 0.8,
+        Value > 0.75 ~ 0.75,
+        Value > 0.7 ~ 0.7,
+        Value > 0.65 ~ 0.65,
+        Value > 0.6 ~ 0.6,
+        Value > 0.55 ~ 0.55,
+        Value > 0.5 ~ 0.5,
+        Value > 0.45 ~ 0.45,
+        Value > 0.4 ~ 0.4,
+        Value > 0.35 ~ 0.35,
+        Value > 0.3 ~ 0.3,
+        Value > 0.25 ~ 0.25,
+        Value > 0.2 ~ 0.2,
+        Value > 0.15 ~ 0.15,
+        Value > 0.1 ~ 0.1,
+        Value > 0.05 ~ 0.05,
+        Value > 0 ~ 0,
+        Value == 0 ~ -0.05,
+        TRUE ~ NA_real_ 
+      )
+  )
+```
+
+
+# Highlights from exploratory data analysis
+
+Please regard the following as extremely preliminary. We'll want to very carefully check the robustness of the relationships these plots seem to show. As you will find by looking at the next section, "More exploratory data analysis", there are plenty of reasons to doubt these plots. 
+
+### Fires that threaten structures more-frequently burn more-vulnerable counties than less-vulnerable counties
+
+In the following code chunk, I find the total number of fires that threatened structures in each
+SVI bucket. 
+
+```{r}
+fires_svi_binned %>% 
+  group_by(bucket) %>% 
+  summarize(n = sum(threatened_count)) %>% 
+  filter(n < 300) %>% 
+  ggplot(aes(x = bucket, y = n)) +
+  geom_col(position = "dodge") +
+  geom_smooth() +
+  labs(
+    title = "Number of fires that threatened structures, 2010-2018",
+    x = 
+      "← Less vulnerable                Social vulnerability                More vulnerable →",
+    y = "Number of fires that threaten structures"
+  )
+```
+
+This plot suggests that there are genererally more fires that threatened structures in counties with higher SVI scores (as in, communities that are deemed more vulnerable) than in communities with lower SVI scores (which are deemed less vulnerable).
+
+### Fires that destroyed structures hit more-vulnerable counties more frequently than less-vulnerable counties
+
+```{r}
+fires_svi_binned %>% 
+  group_by(bucket) %>% 
+  summarize(n = sum(destroyed_count)) %>% 
+  filter(n < 200) %>% 
+  ggplot(aes(x = bucket, y = n)) +
+  geom_col(position = "dodge") +
+  geom_smooth() +
+  labs(
+    title = "Number of fires that destroyed structures, 2010-2018",
+    x = 
+      "← Less vulnerable                Social vulnerability                More vulnerable →",
+    y = "Number of fires that destroyed structures"
+  )
+```
+
+### Fires in less-vulnerable places tend to be larger than fires in more-vulnerable places
+
+```{r}
+fires_svi_binned %>% 
+  left_join(sit_karen_mtbs, by = c("year_fips")) %>% 
+  drop_na(bucket) %>% 
+  group_by(bucket) %>% 
+  summarize(
+    median_acres = median(FIRE_SIZE, na.rm = TRUE)
+  ) %>% 
+  ggplot(aes(x = bucket, y = median_acres)) +
+  geom_col() +
+  geom_smooth() +
+    labs(
+    title = "Median size of fire by SVI bucket, 2010-2018",
+    x = 
+      "← Less vulnerable                Social vulnerability                More vulnerable →",
+    y = "Median size of fire"
+  )
+```
+
+### Fires in less-vulnerable places were more expensive per-acre than fires in more-vulnerable places (?)
+
+```{r}
+fires_svi_binned %>% 
+  left_join(sit_karen_mtbs, by = c("year_fips")) %>% 
+  drop_na(bucket) %>% 
+  group_by(bucket) %>% 
+  summarize(
+    cost = sum(ESTIMATED_COST, na.rm = TRUE),
+    acres = sum(FIRE_SIZE, na.rm = TRUE)
+  ) %>% 
+  filter(acres > 0) %>% 
+  mutate(cost_per_acre = cost / acres) %>% 
+  ggplot(aes(x = bucket, y = cost_per_acre)) +
+  geom_col(position = "dodge") +
+  geom_smooth() +
+    labs(
+    title = "Cost per acre by SVI bucket, 2010-2018",
+    x = 
+      "← Less vulnerable                Social vulnerability                More vulnerable →",
+    y = "Cost per acre"
+  )
+```
+
+# More exploratory data analysis
+
+## Costs per acre by SVI (bin and no bin)
+
+```{r}
+fires_svi %>% 
+  drop_na(Value) %>% 
+  filter(
+    county_cost > 0,
+    county_cost_per_acre < 1e+06
+  ) %>% 
+  ggplot() +
+  geom_point(
+    aes(
+      x = Value, 
+      y = county_cost_per_acre,
+      size = county_fires
+    )
+  )
+```
+
+```{r}
+fires_svi_binned %>% 
+  drop_na(Value) %>% 
+  filter(
+    county_cost > 0,
+    county_cost_per_acre < 1e+06
+  ) %>% 
+  ggplot() +
+  geom_col(aes(x = bucket, y = county_cost_per_acre), position = "dodge")
+```
+
+## Homes threatened
+
+```{r}
+fires_svi %>% 
+  drop_na(Value) %>% 
+  ggplot() +
+  geom_point(
+    aes(
+      x = Value, 
+      y = county_homes_threatened, 
+      size = county_acres, 
+      alpha = county_acres
+    )
+  )
+```
+
+```{r}
+fires_svi_binned %>% 
+  drop_na(Value) %>%
+  group_by(bucket) %>% 
+  summarize(threatened = sum(county_homes_threatened, na.rm = TRUE)) %>% 
+  ggplot() +
+  geom_col(aes(x = bucket, y = threatened), position = "dodge")
+```
+
+## Costs per house damaged or destroyed by SVI (bin and no bin)
+
+```{r}
+fires_svi %>% 
+  drop_na(Value) %>% 
+  filter(county_homes_destroyed > 0) %>% 
+  mutate(cost_per_home_destroyed = county_cost / county_homes_destroyed) %>% 
+  ggplot() +
+  geom_point(
+    aes(
+      x = Value, 
+      y = cost_per_home_destroyed, 
+      size = county_acres, 
+      alpha = county_acres
+    )
+  )
+```
+
+```{r}
+fires_svi_binned %>% 
+  drop_na(Value) %>% 
+  filter(county_homes_destroyed > 0) %>% 
+  mutate(cost_per_home_destroyed = county_cost / county_homes_destroyed) %>% 
+  ggplot() +
+  geom_col(aes(x = bucket, y = cost_per_home_destroyed), position = "dodge")
+```
+
+
+## Comparing medians
+
+
+```{r}
+fires_svi %>% 
+  drop_na(Value) %>% 
+  ggplot() +
+  geom_point(
+    aes(
+      x = Value, 
+      y = county_median_cost, 
+      alpha = county_acres
+    )
+  )
+```
+
+## Total cost by bin
+
+```{r}
+fires_svi_binned %>%
+  group_by(bucket) %>% 
+  summarize(total = sum(county_cost, na.rm = TRUE)) %>% 
+  ggplot() +
+  geom_col(aes(y = total, x = bucket))
+```
+
+## Total acres burned by bin
+
+```{r}
+fires_svi_binned %>%
+  group_by(bucket) %>% 
+  summarize(total = sum(county_acres, na.rm = TRUE)) %>% 
+  ggplot() +
+  geom_col(aes(y = total, x = bucket))
+```
+
+## Median total acres burned by bin
+
+```{r}
+fires_svi_binned %>%
+  group_by(bucket) %>% 
+  summarize(median = median(county_acres, na.rm = TRUE)) %>% 
+  ggplot() +
+  geom_col(aes(y = median, x = bucket))
+```
+
+## Mean total acres burned by bin
+
+```{r}
+fires_svi_binned %>%
+  group_by(bucket) %>% 
+  summarize(mean = mean(county_acres, na.rm = TRUE)) %>% 
+  ggplot() +
+  geom_col(aes(y = mean, x = bucket))
+```
+
+## Total destroyed by bin
+
+```{r}
+fires_svi_binned %>%
+  group_by(bucket) %>% 
+  summarize(total = sum(county_homes_destroyed, na.rm = TRUE)) %>% 
+  ggplot() +
+  geom_col(aes(y = total, x = bucket))
+```
+
+## Ratio of total cost to homes destroyed by bin
+
+```{r}
+fires_svi_binned %>%
+  group_by(bucket) %>% 
+  summarize(
+    homes_destroyed = sum(county_homes_destroyed, na.rm = TRUE),
+    costs = sum(county_cost, na.rm = TRUE),
+    costs_per_home = costs / homes_destroyed
+  ) %>% 
+  ggplot() +
+  geom_col(aes(y = costs_per_home, x = bucket))
+```
+
+Ignore the infinity values.
+
+## Ratio of total cost to homes threatened by bin
+
+```{r}
+fires_svi_binned %>%
+  group_by(bucket) %>% 
+  summarize(
+    homes_threatened = sum(county_homes_threatened, na.rm = TRUE),
+    costs = sum(county_cost, na.rm = TRUE),
+    costs_per_home = costs / homes_threatened
+  ) %>% 
+  ggplot() +
+  geom_col(aes(y = costs_per_home, x = bucket))
+```
+
+Again, ignore the infinity value.
+
+
+# Basic EDA
+
+## Typical size of all fires
+
+```{r}
+sit_karen_mtbs %>% 
+  ggplot() +
+  geom_histogram(aes(FIRE_SIZE))
+```
+
+```{r}
+sit_karen_mtbs %>%
+  filter(FIRE_SIZE > 100) %>% 
+  ggplot() +
+  geom_histogram(aes(FIRE_SIZE))
+```
+
+```{r}
+sit_karen_mtbs %>%
+  filter(FIRE_SIZE > 1000) %>% 
+  ggplot() +
+  geom_histogram(aes(FIRE_SIZE))
+```
+
+```{r}
+sit_karen_mtbs %>%
+  filter(FIRE_SIZE > 0) %>% 
+  ggplot() +
+  geom_boxplot(aes(y = FIRE_SIZE))
+```
+
+## Typical size of fires by bin
+
+```{r fig.asp=5}
+fires_svi_binned %>% 
+  ggplot() +
+  geom_boxplot(aes(y = county_median_acres)) +
+  facet_wrap(facets = vars(bucket))
+```
+
+## Typical number of fires in a county each year
+
+```{r}
+county_summary %>% 
+  filter(!str_detect(county_fips, "NA")) %>% 
+  ggplot() +
+  geom_boxplot(aes(y = county_fires))
+```
+
+```{r}
+county_summary %>% 
+  filter(!str_detect(county_fips, "NA")) %>% 
+  arrange(desc(county_fires))
+```
+
+
+## Typical number of fires in a county each year, by bin
+
+```{r}
+fires_svi_binned %>% 
+  filter(!str_detect(county_fips, "NA")) %>% 
+  ggplot() +
+  geom_boxplot(aes(y = county_fires, group = bucket))
+```
+
+## Typical cost of all fires
+
+```{r}
+sit209 %>% 
+  drop_na(ESTIMATED_COST) %>% 
+  ggplot() +
+  geom_histogram(aes(ESTIMATED_COST))
+```
+
+## Typical cost of fires by bin
+
+```{r}
+fires_svi_binned %>% 
+  left_join(sit_karen_mtbs, by = c("year_fips")) %>% 
+  drop_na(ESTIMATED_COST, bucket) %>% 
+  group_by(bucket) %>% 
+  summarize(median_cost = median(ESTIMATED_COST)) %>% 
+  ggplot(aes(x = bucket, y = median_cost)) +
+  geom_col(position = "dodge")
+```
+
+```{r}
+fires_svi_binned %>% 
+  left_join(sit_karen_mtbs, by = c("year_fips")) %>% 
+  drop_na(ESTIMATED_COST, bucket) %>% 
+  group_by(bucket) %>% 
+  summarize(mean_cost = mean(ESTIMATED_COST)) %>% 
+  ggplot(aes(x = bucket, y = mean_cost)) +
+  geom_col(position = "dodge")
+```
+
+## Ratio of cost per acre
+
+```{r}
+fires_svi_binned %>% 
+  left_join(sit_karen_mtbs, by = c("year_fips")) %>% 
+  drop_na(bucket) %>% 
+  group_by(bucket) %>% 
+  summarize(
+    cost = sum(ESTIMATED_COST, na.rm = TRUE),
+    acres = sum(FIRE_SIZE, na.rm = TRUE)
+  ) %>% 
+  filter(acres > 0) %>% 
+  mutate(cost_per_acre = cost / acres) %>% 
+  ggplot(aes(x = bucket, y = cost_per_acre)) +
+  geom_col(position = "dodge")
+```
+
+## county_summary analysis
+
+```{r}
+county_summary %>% 
+  group_by(REPORT_YEAR) %>% 
+  summarize(destructive_fires = sum(destroyed_count)) %>% 
+  ggplot() +
+  geom_point(aes(x = REPORT_YEAR, y = destructive_fires)) +
+  geom_line(aes(x = REPORT_YEAR, y = destructive_fires))
+```
+
+```{r}
+county_summary %>% 
+  group_by(county_fips) %>% 
+  summarize(destructive_fires = sum(destroyed_count)) %>% 
+  filter(!str_detect(county_fips, "NA")) %>% 
+  arrange(desc(destructive_fires))
+```
+
+```{r}
+sit_karen_mtbs %>% 
+  filter(county_fips == "6105") # Trinity County California
+```
+

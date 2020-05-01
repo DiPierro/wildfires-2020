@@ -1,6 +1,11 @@
-# Counties: SVI + Karen Short + SIT-209 + Perimeters
-##### Amy DiPierro
-##### `r Sys.Date()`
+---
+title: County wildfire analysis
+author: Amy DiPierro
+date: "`r Sys.Date()`"
+output: 
+  github_document:
+    toc: true
+---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)

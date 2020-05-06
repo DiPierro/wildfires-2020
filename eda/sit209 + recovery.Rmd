@@ -1,0 +1,535 @@
+---
+title: SIT-209 + Recovery metrics
+author: Amy DiPierro
+date: "`r Sys.Date()`"
+output: 
+  github_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Libraries
+library(tidyverse)
+library(jsonlite)
+library(sf)
+library(tidycensus)
+
+# Parameters
+
+## SIT-209
+file_sit209 <- here::here("data-raw", "wildfires_deduped.csv")
+
+## Tax data
+## Source: https://www.boe.ca.gov/dataportal/dataset.htm?url=PropTaxAssessedValueStateCounty
+file_taxes <- here::here("data-raw", "PropTaxAssessedValueStateCounty.csv")
+
+#===============================================================================
+
+# Code
+
+# Read in the SIT-209 data
+sit209 <-
+  file_sit209 %>% 
+  read_csv(
+    col_types = 
+      cols(
+        .default = col_character(),
+        LATITUDE = col_double(),
+        LONGITUDE = col_double(),
+        ESTIMATED_COST = col_double(),
+        REPORT_DATE = col_datetime(format = ""),
+        MAX_PERSONNEL = col_double(),
+        INCIDENT_AREA = col_double(),
+        MAX_SFR_THREAT = col_double(),
+        MAX_MFR_THREAT = col_double(),
+        MAX_MU_THREAT = col_double(),
+        MAX_COMM_THREAT = col_double(),
+        MAX_OUTB_THREAT = col_double(),
+        MAX_OTHER_THREAT = col_double(),
+        SFR_DAMAGED = col_double(),
+        MFR_DAMAGED = col_double(),
+        MU_DAMAGED = col_double(),
+        COMM_DAMAGED = col_double(),
+        OTHER_DAMAGED = col_double(),
+        SFR_DESTROYED = col_double(),
+        MFR_DESTROYED = col_double(),
+        MU_DESTROYED = col_double(),
+        COMM_DESTROYED = col_double(),
+        OUTB_DESTROYED = col_double(),
+        OTHER_DESTROYED = col_double(),
+        INJURIES = col_double(),
+        FATALITIES = col_double(),
+        REPORT_ID = col_character(),
+        WILDFIRE = col_logical(),
+        STATE_FIPS = col_character(),
+        DESTROYED = col_logical(),
+        THREATENED = col_logical(),
+        CLIMATE_REGION = col_character()
+      )
+  )
+
+# Read in county data
+
+counties <- 
+  ussf::boundaries(geography = c("county"), projection = c("longlat")) %>% 
+  st_transform(crs = 4269)
+
+# Read in the tax data
+
+taxes <- read_csv(file_taxes)
+
+```
+
+# Summary
+
+Progress so far:
+
+* Used one method to assign one county to each wildfire in the SIT-209
+* Joined this summarized data to home occupancy data from the Census and did preliminary analysis
+* Read in property tax data in California to be explored
+
+Next steps:
+
+* Revisit the method used to assign one county per wildfire. Consider using wildfire perimeters and, maybe, some measure of population density to split SIT-209 stats for a single fire among more than one county.
+* Consider other recovery metrics.
+
+# Data wrangling
+
+The following analysis will focus only on **fires in which at least one single-family home was destroyed.**
+
+Of this subset of fires, how many don't have latitude or longitude? Since there are disasters that aren't wildfires in this data, we'll limit ourselves to wildfires specifically.
+
+```{r}
+sit209 %>% 
+  filter(
+    SFR_DESTROYED > 0,
+    INCIDENT_TYPE %in% c("Complex", "Wildfire", "WF", "WFU")
+  ) %>% 
+  count(is.na(LONGITUDE) | is.na(LATITUDE))
+```
+
+Luckily, there's a boolean field called `WILDFIRE` that helps us to handle this.
+
+Just 37 points are missing, so we'll start by finding the counties in which these fires began.
+
+First, we convert the points in our SIT-209 data into an SF object, which will allow us to do spatial analysis. We also filter to only fires in which at least one single-family home was destroyed.
+
+```{r}
+sit209_sf <-
+  sit209 %>% 
+  drop_na(LONGITUDE, LATITUDE) %>% # Leave out records missing LATITUDE or LONGITUDE
+  filter(
+    SFR_DESTROYED > 0,
+    WILDFIRE == TRUE
+  ) %>% 
+  mutate( # Standardized latitude and longitude into the correct hemisphere
+    LATITUDE = if_else(LATITUDE < 0, LATITUDE * -1, LATITUDE),
+    LONGITUDE = if_else(LONGITUDE > 0, LONGITUDE * -1, LONGITUDE)
+  ) %>% 
+  # Use lat/long to make an sf object for spatial operations
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4269) 
+
+```
+
+
+Now we can use the newly-created geometry column in the tibble above to find which counties were the origin points of which fires.
+
+```{r}
+lat_long_counties <- 
+  st_intersection(counties, sit209_sf) %>% # Find which points are in which counties
+  st_set_geometry(NULL) %>% # Remove the geometry column, which we don't need anymore.
+  select( # Select the columns we need.
+    GEOID, 
+    NAME,
+    colnames(sit209 %>% select(-LONGITUDE, -LATITUDE)),
+    -COUNTY
+  )
+```
+
+But that still leaves 47 fires left, for which we lack longitude, latitude or both. We can fill in some of these locations if they contain a valid county name.
+
+```{r}
+
+other_counties <-
+  sit209 %>% 
+  filter(
+    SFR_DESTROYED > 0,
+    WILDFIRE == TRUE,
+    is.na(LONGITUDE) | is.na(LATITUDE)
+  ) %>% 
+  # Standardize these fields so that they correspond with the data in `counties`
+  mutate(
+    COUNTY = str_to_title(COUNTY),
+    STATE_FIPS = map(STATE_FIPS, ~ if_else(length(.) < 2, str_c("0", .),.)),
+    STATE_FIPS = pluck(STATE_FIPS, 1)
+  ) %>% 
+  # Join the SIT-209 to `counties`, this time using a common ID.
+  left_join(counties, by = c("COUNTY" = "NAME", "STATE_FIPS" = "STATEFP")) %>% 
+  # Drop rows that didn't match
+  drop_na(COUNTYFP) %>% 
+  # Select and standardize the columns we'll need for the next step
+  select(
+    GEOID, 
+    NAME = "COUNTY",
+    colnames(sit209 %>% select(-LONGITUDE, -LATITUDE))
+  )
+```
+
+There are a few fires still unaccounted for. Of these, about 13 don't have county names, which would make it difficult to match them programmatically. If need be, we can look up information about these fires manually in order to find their true locations.
+
+Finally, now that the columns in `other_counties` and `lat_long_counties` are identical, we can join them vertically.
+
+```{r}
+joined <-
+  bind_rows(other_counties, lat_long_counties)
+```
+
+Let's see what our year range is looking like now that we've done this join.
+
+```{r}
+joined %>% 
+  count(REPORT_YEAR)
+```
+
+Let's limit our range to 2006 and greater, since things are so sparse prior to that:
+
+```{r}
+joined <-
+  joined %>% 
+  filter(REPORT_YEAR > 2005)
+```
+
+Let's check that there are no duplicates.
+
+```{r}
+joined %>% 
+  count(INCIDENT_NUMBER, GEOID, sort = TRUE) %>% 
+  filter(n > 1)
+```
+
+Well, there are a few, but we can go back to clear these up later.
+
+```{r}
+sit209 %>% 
+  count(INCIDENT_NUMBER, COUNTY, sort = TRUE)
+```
+
+
+# Summarizing at the county level
+
+For each county where at least one fire in the SIT-209 burned at least one single-family residence, we can now compute various summary statistics.
+
+```{r}
+joined_summarized <-
+  joined %>% 
+  mutate(
+    GEOID = 
+      # Standardize a few county FIPS codes
+      case_when(
+        NAME == "Washington" & STATE == "OK" ~ "40147",
+        NAME == "Jackson" & STATE == "FL" ~ "12063",
+        NAME == "Jackson" & STATE == "NC" ~ "37099",
+        NAME == "Marion" & STATE == "MS" ~ "28091",
+        TRUE ~ GEOID
+      )
+  ) %>% 
+  group_by(NAME, STATE, GEOID, REPORT_YEAR) %>%
+  summarize(
+    # Compute summary statistics
+    total_cost = sum(ESTIMATED_COST, na.rm = TRUE),
+    total_acres = sum(INCIDENT_AREA, na.rm = TRUE),
+    total_homes_destroyed = sum(SFR_DESTROYED, na.rm = TRUE),
+    total_homes_damaged = sum(SFR_DAMAGED, na.rm = TRUE),
+    total_fires = n(),
+    total_personnel = sum(MAX_PERSONNEL, na.rm = TRUE)
+  ) 
+```
+
+Let's see which counties were the hardest hit, by different metrics.
+
+Most homes destroyed:
+
+```{r}
+joined_summarized %>% 
+  group_by(NAME, STATE) %>% 
+  summarize(total_homes_destroyed = sum(total_homes_destroyed, na.rm = TRUE)) %>% 
+  arrange(desc(total_homes_destroyed))
+```
+
+
+Most personnel sent to fires that destroyed homes:
+
+```{r}
+joined_summarized %>% 
+  group_by(NAME, STATE) %>% 
+  summarize(total_personnel = sum(total_personnel, na.rm = TRUE)) %>% 
+  arrange(desc(total_personnel))
+```
+
+Most money spent on fires that destroyed homes:
+
+```{r}
+joined_summarized %>% 
+  group_by(NAME, STATE) %>% 
+  summarize(total_cost = sum(total_cost, na.rm = TRUE)) %>% 
+  arrange(desc(total_cost))
+```
+
+Please note that Box Elder is a county in Utah, not Colorado. This suggests that the spatial join, based on point of origin, might have worked imperfectly, since the column "STATE" is drawn from `sit209` and "NAME" is drawn from `counties`. Perhaps the fire began in Utah, but ultimately crossed into Colorado?
+
+```{r}
+sit209 %>% 
+  filter(
+    STATE == "CO",
+    MAX_PERSONNEL == 342,
+    SFR_DESTROYED == 1
+  )
+```
+
+Puzzlingly enough, this fire burned in La Plata County, Colo., which does not share a border with Utah. News reports confirm that it was near Durango...which again, is far from Utah. 
+
+In other words, using Lat/Long appears to work well in some cases but not in others. Additionally, this strategy doesn't work for fires that extend into multiple counties. Ideally, we would be able to split the stats for fires into the counties they impacted. For example, if a fire did 90% of its damage in County A and 10% damage in County B, County A would get 10% of the damage statistics and County B would get the rest of the damage stats.
+
+# Joining to occupancy metrics
+
+Let's start by grabbing recent occupancy statistics from the ACS.
+
+```{r}
+years <- c(2010:2018)
+
+eligible_vars <- 
+  c(
+    "B25002_001",
+    "B25002_002",
+    "B25002_003"
+  )
+
+get_occupancy <- function(year) {
+  get_acs(
+    geography = "county",
+    variables = eligible_vars,
+    year = year,
+    survey = "acs1"
+  ) %>% 
+  mutate(
+    variable =
+      case_when(
+        variable == "B25002_001" ~ "total_homes",
+        variable == "B25002_002" ~ "occupied_homes",
+        variable == "B25002_003" ~ "vacant_homes",
+        TRUE ~ NA_character_
+      ),
+    year = as.character(year)
+  )
+}
+
+years %>% 
+  map(get_occupancy) %>% 
+  bind_rows() -> occupancy
+
+```
+
+Now, let's wrangle this data just a little bit to make it tidy.
+
+```{r}
+occupancy_pivoted <-
+  occupancy %>% 
+  pivot_wider(
+    id_cols = c("NAME", "GEOID", "year"),  
+    names_from = variable,
+    values_from = estimate
+  ) %>% 
+  unnest() %>% 
+  mutate(ratio_vacant = vacant_homes / total_homes)
+```
+
+Finally, we join it to the SIT-209 data, summarized at the county level. We also add some new metrics to our analysis.
+
+```{r}
+joined_occupancy <-
+  occupancy_pivoted %>% 
+  left_join(joined_summarized, by = c("GEOID", "year" = "REPORT_YEAR")) %>%
+  select(NAME.x, ratio_vacant, year, total_homes_destroyed) %>% 
+  mutate(fire_year = if_else(!is.na(total_homes_destroyed), TRUE, FALSE)) %>% 
+  group_by(NAME.x) %>% 
+  mutate(
+    fire_since_2010 = 
+      if_else(sum(total_homes_destroyed, na.rm = TRUE) > 0, TRUE, FALSE)
+  ) %>% 
+  ungroup()
+```
+
+Now we can visualize the differences between places that experienced fires during this period and places that didn't.
+
+```{r}
+joined_occupancy %>%
+  arrange(year) %>% 
+  group_by(NAME.x, fire_since_2010) %>% 
+  summarize(pct_change = (last(ratio_vacant) - first(ratio_vacant)) / first(ratio_vacant)) %>% 
+  ggplot() +
+  geom_boxplot(aes(y = pct_change, x = fire_since_2010)) +
+  geom_hline(
+    data = . %>% filter(fire_since_2010 == FALSE), 
+    color = "red",
+    aes(yintercept = median(pct_change))
+  ) +
+  geom_hline(
+    data = . %>% filter(fire_since_2010 == TRUE),
+    color = "blue",
+    aes(yintercept = median(pct_change))
+  )
+```
+
+The box plot above suggests that there isn't much of a difference in change in vacancy rates in communities with fires versus communities without them during this period.
+
+Let's look at the changes over time in a smaller subset of the data:
+
+```{r}
+joined %>% 
+  arrange(desc(SFR_DESTROYED)) %>% 
+  filter(REPORT_YEAR == 2010) %>%
+  head(10) %>% 
+  left_join(
+    occupancy_pivoted %>% 
+      select(GEOID, ratio_vacant, year) %>% 
+      pivot_wider(
+        names_from = year,
+        values_from = ratio_vacant,
+        names_prefix = "ratio_vacant_"
+      ), 
+    by = c("GEOID")
+  ) %>% 
+  pivot_longer(
+    cols = 
+      c(
+        ratio_vacant_2010,
+        ratio_vacant_2011,
+        ratio_vacant_2012,
+        ratio_vacant_2013,
+        ratio_vacant_2014,
+        ratio_vacant_2015,
+        ratio_vacant_2016, 
+        ratio_vacant_2017,
+        ratio_vacant_2018
+      ),
+    names_to = "year",
+    values_to = "ratio_vacant"
+  ) %>% 
+  ggplot() +
+  geom_point(aes(x = year, y = ratio_vacant, group = NAME, color = NAME)) +
+  geom_line(aes(x = year, y = ratio_vacant, group = NAME, color = NAME))
+```
+
+The above doesn't seem to suggest large swings in the ratio of vacant homes post wildfire. Granted, it also doesn't account for multiple fires during this period.
+
+# Property assessments in California
+
+Goal: Make a dataframe to the following specifications
+
+
+First, let's choose a year in which there were more than one fairly-destructive fires, 
+
+```{r}
+joined_summarized %>% 
+  filter(STATE == "CA") %>% 
+  arrange(desc(total_homes_destroyed)) %>% 
+  head(12) %>% 
+  ggplot() +
+  ggrepel::geom_label_repel(aes(x = REPORT_YEAR, y = total_fires, label = NAME)) +
+  geom_point(aes(x = REPORT_YEAR, y = total_fires, group = NAME, color = NAME)) +
+  scale_color_viridis_d()
+```
+
+The above plot is another example of how our spatial join doesn't always work. Pushmataha is a county in Oklahoma (!!!!!!) and Clay County is in Florida, so this spatial join definitely didn't work perfectly.
+
+But as a general principle, we can see that fires that destroyed homes did not hit the same county more than once in this time period. 
+
+So, for example, we could track changes in property taxes in San Diego and San Bernardino sice 2007, or in Lake and Amador since 2015 or in Sonoma and Mendocino since 2017 or in Shasta, Ventura and Butte since 2018.
+
+Let's check out the same plot, but for fire acres. My goal here is to help us to find fires that are reasonable to compare.
+
+```{r}
+joined_summarized %>% 
+  filter(STATE == "CA") %>% 
+  arrange(desc(total_homes_destroyed)) %>% 
+  head(12) %>% 
+  ggplot() +
+  ggrepel::geom_label_repel(aes(x = REPORT_YEAR, y = total_acres, label = NAME)) +
+  geom_point(aes(x = REPORT_YEAR, y = total_acres, group = NAME, color = NAME)) +
+  scale_color_viridis_d()
+```
+
+How about for homes destroyed, throughout the country?
+
+```{r}
+joined_summarized %>% 
+  arrange(desc(total_homes_destroyed)) %>% 
+  head(12) %>% 
+  ggplot() +
+  ggrepel::geom_label_repel(aes(x = REPORT_YEAR, y = total_homes_destroyed, label = NAME)) +
+  geom_point(aes(x = REPORT_YEAR, y = total_homes_destroyed, group = NAME, color = NAME)) +
+  scale_color_viridis_d()
+```
+
+The problem with making this comparison is that the Camp Fire was so darn destructive compared to anything else we've seen, even if it's likely to be the "new normal".
+
+```{r}
+taxes %>% 
+  # left_join(
+  #   joined_summarized %>% mutate(REPORT_YEAR = as.double(REPORT_YEAR)),
+  #   by = c("County" = "NAME", "Assessment Year From" = "REPORT_YEAR")
+  # ) %>% 
+  filter(County %in% c("San Diego", "San Bernardino")) %>% 
+  ggplot(aes(x = `Assessment Year From`, y = `Year To Year Change (%)`, group = County, color = County)) +
+  geom_point() +
+  geom_path()
+```
+
+So...both experience a big drop following the fires in 2007, but (ugh) the timing of the recovery from these fires inconveniently coincides with the dawn of the recession. Maybe there's a way to account for the extent to which these counties dipped more or earlier compared to valuations elsewhere in California.
+
+```{r}
+taxes %>% 
+  filter(County %in% c("Shasta", "Ventura", "Butte")) %>% 
+  ggplot(aes(x = `Assessment Year From`, y = `Year To Year Change (%)`, group = County, color = County)) +
+  geom_point() +
+  geom_path()
+```
+
+As previously pointed out, the drop around 2007 and especially 2008 has more to do with the recession than with fires. 
+
+But if we look at just the asssessments just before and since the fires in these counties in 2018, what do we see?
+
+```{r}
+taxes %>% 
+  # left_join(
+  #   joined_summarized %>% mutate(REPORT_YEAR = as.double(REPORT_YEAR)),
+  #   by = c("County" = "NAME", "Assessment Year From" = "REPORT_YEAR")
+  # ) %>% 
+  filter(
+    County %in% c("Shasta", "Ventura", "Butte"),
+    `Assessment Year From` >= 2017
+  ) %>% 
+  ggplot(aes(x = `Assessment Year From`, y = `Year To Year Change (%)`, group = County, color = County)) +
+  geom_point() +
+  geom_path()
+```
+
+Big, big dip for Butte County, and a smaller one for Shasta County. 
+
+Finally, how about Lake and Amador in 2015?
+
+```{r}
+taxes %>% 
+  filter(County %in% c("Lake", "Amador")) %>% 
+  ggplot(aes(x = `Assessment Year From`, y = `Year To Year Change (%)`, group = County, color = County)) +
+  geom_point() +
+  geom_path() +
+  geom_vline(aes(xintercept = 2015), color = "blue")
+```
+
+
+Interesting. A significant drop for Lake but not for Amador.

@@ -1,0 +1,585 @@
+---
+title: 
+author: 
+date: "`r Sys.Date()`"
+output: 
+  github_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Libraries
+library(tidyverse)
+library(sf)
+library(tidycensus)
+library(dbplyr)
+
+# Parameters
+
+## All historical perimeters
+file_geomac <- here::here("data-raw", "US_HIST_FIRE_PERIMTRS_DD83", "US_HIST_FIRE_PERIMTRS_DD83.shp")
+## 2000 SVI
+file_svi_2000 <- here::here("data-raw", "SVI2000_US.csv")
+## 2010 SVI
+file_svi_2010 <- here::here("data-raw", "SVI2010_US.csv")
+## 2014 SVI
+file_svi_2014 <- here::here("data-raw", "SVI2014_US", "SVI2014_US.shp")
+## 2016 SVI
+file_svi_2016 <- here::here("data-raw", "SVI2016_US", "SVI2016_US.shp")
+## 2018 SVI
+file_svi_2018 <- here::here("data-raw", "SVI2018_US", "SVI2018_US_tract.shp")
+# SIT-209: 2014 - 2017
+# Source: BigLocalNews
+# Download date: 2020-04-22
+# Years: 2014 - 2017
+url_sit209 <- "https://stacks.stanford.edu/file/druid:xj043rd8767/xj043rd8767_fire_reports_2014-2017.csv"
+# Monitoring Trends in Burn Severity: Burned Areas Boundary Dataset
+# Source: https://www.mtbs.gov/direct-download
+# Download date: 2020-04-21
+# Geography: United States
+# Years: 2006 - 2017
+file_fires <- here::here("data-raw", "mtbs_perimeter_data", "mtbs_perims_DD.shp")
+
+
+#===============================================================================
+
+# Code
+
+# Read in the MTBS data
+fires <-
+  read_sf(file_fires)
+
+## Read in the GEOMAC data, slice it into years
+
+geomac <-
+  read_sf(file_geomac)
+
+geomac_2000 <-
+  geomac %>% 
+  filter(year_ == "2000")
+
+geomac_2010 <-
+  geomac %>% 
+  filter(year_ == "2010")
+
+geomac_2014 <-
+  geomac %>% 
+  filter(year_ == "2014")
+
+geomac_2016 <-
+  geomac %>% 
+  filter(year_ == "2016")
+
+geomac_2018 <-
+  geomac %>% 
+  filter(year_ == "2018")
+
+## Read in the SVI data
+
+svi_2000 <-
+  file_svi_2000 %>% 
+  read_csv()
+
+svi_2010 <-
+  file_svi_2010 %>% 
+  read_csv()
+
+svi_2014 <-
+  read_sf(file_svi_2014)
+
+svi_2016 <-
+  read_sf(file_svi_2016)
+
+svi_2018 <-
+  read_sf(file_svi_2018)
+
+## Get tract boundaries to join with 2000, 2010 csvs
+## This is an extra step required for these two years only
+
+# us <- unique(fips_codes$state)[1:51]
+# 
+# totalpop <- 
+#   map_df(
+#     us, 
+#     function(x) {
+#       get_acs(geography = "tract", variables = "B01003_001", state = x, geometry = TRUE)
+#     }
+#   )
+# 
+# svi_2000_geo <-
+#   svi_2000 %>% 
+#   left_join(totalpop, by = c("FIPS" = "GEOID")) %>% 
+#   st_as_sf() 
+# 
+# svi_2010_geo <-
+#   svi_2010 %>% 
+#   left_join(totalpop, by = c("FIPS" = "GEOID")) %>% 
+#   st_as_sf()
+
+## Buffer and join the 2000 data
+
+# svi_2000_buff <- st_as_sf(svi_2000_geo) %>% st_buffer(0.0001)
+# 
+# geomac_2000_buff <- st_as_sf(geomac_2000) %>% st_buffer(0.0001)
+# 
+# joined_buffered_2000 <- 
+#   st_join(geomac_2000_buff, svi_2000_buff, left = TRUE, st_overlaps)
+
+## Buffer and join the 2010 data
+
+# svi_2010_buff <- st_as_sf(svi_2010_geo) %>% st_buffer(0.0001)
+# 
+# geomac_2010_buff <- st_as_sf(geomac_2010) %>% st_buffer(0.0001)
+# 
+# joined_buffered_2010 <- 
+#   st_join(geomac_2010_buff, svi_2010_buff, left = TRUE, st_overlaps)
+
+## Buffer and join the 2014 data
+
+svi_2014_buff <- st_as_sf(svi_2014) %>% st_buffer(0.0001)
+
+geomac_2014_buff <- st_as_sf(geomac_2014) %>% st_buffer(0.0001)
+
+joined_buffered_2014 <- 
+  st_join(geomac_2014_buff, svi_2014_buff, left = TRUE, st_overlaps)
+
+## Buffer and join the 2016 data
+
+svi_2016_buff <- st_as_sf(svi_2016) %>% st_buffer(0.0001)
+
+geomac_2016_buff <- st_as_sf(geomac_2016) %>% st_buffer(0.0001)
+
+joined_buffered_2016 <- 
+  st_join(geomac_2016_buff, svi_2016_buff, left = TRUE, st_overlaps)
+
+## Buffer and join the 2018 data
+
+svi_2018_buff <- st_as_sf(svi_2018) %>% st_buffer(0.0001)
+
+geomac_2018_buff <- st_as_sf(geomac_2018) %>% st_buffer(0.0001)
+
+joined_buffered <- 
+  st_join(geomac_2018_buff, svi_2018_buff, left = TRUE, st_overlaps)
+
+# Read in the SIT 209
+sit209 <- 
+  read_csv(url_sit209)
+```
+
+Now that we're finished reading in all of these many, many datasets, and wrangling them, let's add one more: Karen Short's data from [here](https://www.fs.usda.gov/rds/archive/catalog/RDS-2013-0009.4). We'll use her data as a crosswalk between SIT-209 and MTBS so that we can join both to SVI.
+
+```{r}
+# Connect to the database
+con <-
+  DBI::dbConnect(
+    drv = RSQLite::SQLite(),
+    dbname = here::here("data-raw", "RDS-2013-0009", "Data", "FPA_FOD_20170508.sqlite"),
+  )
+
+# Read the Fires table into a dataframe
+karen <- DBI::dbReadTable(con, "Fires")
+
+# Disconect the database
+DBI::dbDisconnect(con)
+```
+
+```{r}
+karen %>% count(FIRE_YEAR)
+```
+
+
+```{r}
+
+# THIS IS MESSED UP. NEED TO KEEP WORKING ON IT
+# ALTERNATIVE IS ANOTHER LEFT JOIN WITH FIRES
+
+sit209_karen <-
+  sit209 %>% 
+  mutate(INC_IDENTIFIER = as.character(INC_IDENTIFIER)) %>% 
+  left_join(karen, by = c("INC_IDENTIFIER" = "ICS_209_INCIDENT_NUMBER")) %>% 
+  drop_na(MTBS_ID) %>% 
+  group_by(MTBS_ID) %>% 
+  summarize(
+    cost = max(EST_IM_COST_TO_DATE, na.rm = TRUE),
+    homes_destroyed = max(SFR_DESTROYED, na.rm = TRUE),
+    homes_damaged = max (SFR_DAMAGED, na.rm = TRUE),
+    homes_threatened = max(SFR_THREATENED_72, na.rm = TRUE),
+    acres = max(CURR_INCIDENT_AREA),
+    cost_per_acre = cost / acres,
+    homes_destroyed_per_acre = homes_destroyed / acres,
+    homes_damaged_per_acre = homes_damaged / acres,
+    homes_threatened_per_acre = homes_threatened / acres
+  )
+
+ids <- sit209_karen %>% arrange(MTBS_ID) %>% pull(MTBS_ID)
+
+sit209_geo <-
+  fires %>% 
+  arrange(Fire_ID) %>% 
+  filter(Fire_ID %in% ids) %>% 
+  bind_cols(sit209_karen)
+  
+sit_svi_2014 <-
+  sit209_geo %>%
+  filter(Year == 2014) %>%
+  st_intersection(svi_2014)
+
+sit_svi_2015 <-
+  sit209_geo %>%
+  filter(Year == 2015) %>%
+  st_intersection(svi_2016)
+
+```
+
+
+
+```{r}
+sit_svi_2014 %>% 
+  filter(
+    RPL_THEMES != -999,
+    homes_threatened > 0
+  ) %>% 
+  mutate(
+    cost_per_home_threatened = cost / homes_threatened
+  ) %>% 
+  filter(cost_per_home_threatened < 3e+07) %>% 
+  ggplot(aes(y = cost_per_home_threatened, x = RPL_THEMES)) +
+  geom_point(aes(color = acres, size = acres)) +
+  scale_color_viridis_c() +
+  labs(title = "2014")
+
+sit_svi_2015 %>% 
+  filter(
+    RPL_THEMES != -999,
+    homes_threatened > 0
+  ) %>% 
+  mutate(
+    cost_per_home_threatened = cost / homes_threatened
+  ) %>% 
+  filter(cost_per_home_threatened < 3e+06) %>% 
+  ggplot(aes(y = cost_per_home_threatened, x = RPL_THEMES)) +
+  geom_point(aes(color = acres, size = acres)) +
+  scale_color_viridis_c() +
+  labs(title = "2015")
+
+```
+
+
+
+
+```{r}
+# Filter the data to just California
+
+svi_2018_CA <-
+  svi_2018 %>% 
+  filter(STATE == "CALIFORNIA") 
+
+geomac_2018_CA <-
+  geomac_2018 %>% 
+  filter(str_detect(fire_num, "2018-CA"))
+```
+
+
+```{r fig.asp = 3}
+svi_2018_CA %>% 
+  filter(RPL_THEMES != -999) %>% 
+  ggplot() +
+  geom_sf(aes(fill = RPL_THEMES)) +
+  geom_sf(data = geomac_2018_CA, color = "white", fill = NA) +
+  scale_fill_viridis_c() +
+  theme_void()
+```
+
+```{r}
+geomac_2018_CA %>%
+  filter(fire_name %in% c("CAMP")) %>% 
+  ggplot() +
+  geom_sf(
+    data = 
+      svi_2018_CA %>% 
+      filter(
+        COUNTY %in% c("Butte"),
+        RPL_THEMES != -999
+      ), 
+    aes(fill = RPL_THEMES)
+  ) +
+  geom_sf(color = "white", fill = NA) +
+  scale_fill_viridis_c() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+joined_buffered %>% 
+  filter(
+    fire_name == "CAMP",
+    COUNTY == "Butte"
+  ) %>% 
+  group_by(LOCATION) %>% 
+  summarize(RPL_THEMES) %>% 
+  arrange(desc(RPL_THEMES))
+        
+```
+
+Census tract north of Oroville versus 
+
+
+```{r}
+svi_acreage_2018 <-
+  svi_2018 %>% 
+  left_join(as_data_frame(joined_buffered), by = c("FIPS")) %>% 
+  mutate(
+    has_fire = if_else(is.na(fire_name), "No fire", "Fire"),
+    rescaled_acres = scales::rescale(acres, to = c(0,1))
+  )
+
+svi_acreage_2016 <-
+  svi_2016 %>% 
+  left_join(as_data_frame(joined_buffered_2016), by = c("FIPS")) %>% 
+  mutate(
+    has_fire = if_else(is.na(fire_name), "No fire", "Fire"),
+    rescaled_acres = scales::rescale(acres, to = c(0,1))
+  )
+
+svi_acreage_2014 <-
+  svi_2014 %>% 
+  left_join(as_data_frame(joined_buffered_2014), by = c("FIPS")) %>% 
+  mutate(
+    has_fire = if_else(is.na(fire_name), "No fire", "Fire"),
+    rescaled_acres = scales::rescale(acres, to = c(0,1))
+  )
+```
+
+```{r}
+svi_acreage_2018 %>% 
+  filter(RPL_THEMES.x != -999) %>% 
+  ggplot(aes(y = RPL_THEMES.x)) +
+  geom_boxplot(aes(group = has_fire, color = has_fire)) 
+
+svi_acreage_2016 %>% 
+  filter(RPL_THEMES.x != -999) %>% 
+  ggplot(aes(y = RPL_THEMES.x)) +
+  geom_boxplot(aes(group = has_fire, color = has_fire)) 
+
+svi_acreage_2014 %>% 
+  filter(RPL_THEMES.x != -999) %>% 
+  ggplot(aes(y = RPL_THEMES.x)) +
+  geom_boxplot(aes(group = has_fire, color = has_fire)) 
+```
+
+```{r}
+svi_acreage_2018 %>% 
+  drop_na(acres) %>%
+  filter(RPL_THEMES.x != -999) %>% 
+  ggplot(aes(x = RPL_THEMES.x, y = rescaled_acres)) +
+  geom_point() +
+  labs(title = "2018")
+
+svi_acreage_2016 %>% 
+  drop_na(acres) %>%
+  filter(RPL_THEMES.x != -999) %>% 
+  ggplot(aes(x = RPL_THEMES.x, y = rescaled_acres)) +
+  geom_point() +
+  labs(title = "2016")
+
+svi_acreage_2014 %>% 
+  drop_na(acres) %>%
+  filter(RPL_THEMES.x != -999) %>% 
+  ggplot(aes(x = RPL_THEMES.x, y = rescaled_acres)) +
+  geom_point() +
+  labs(title = "2014")
+```
+
+
+
+```{r}
+svi_acreage_2018 %>% 
+  filter(rescaled_acres >= 0.5) %>% 
+  count(STATE.x, COUNTY.x, LOCATION.x, RPL_THEMES.x) %>% 
+  arrange(desc(RPL_THEMES.x))
+
+svi_acreage_2016 %>% 
+  filter(rescaled_acres >= 0.5) %>% 
+  count(STATE.x, COUNTY.x, LOCATION.x, RPL_THEMES.x) %>% 
+  arrange(desc(RPL_THEMES.x))
+
+svi_acreage_2014 %>% 
+  filter(rescaled_acres >= 0.5) %>% 
+  count(STATE.x, COUNTY.x, LOCATION.x, RPL_THEMES.x) %>% 
+  arrange(desc(RPL_THEMES.x))
+```
+
+Shasta County - the Carr fire - 2018
+https://censusreporter.org/data/map/?table=B19013&geo_ids=05000US06089,140|05000US06089&primary_geo_id=05000US06089
+
+Monterey County - Soberanes Fire - 2016
+https://censusreporter.org/data/map/?table=B19013&geo_ids=05000US06053,140|05000US06053&primary_geo_id=05000US06053 
+
+Okanogan Complex Fire - 2014
+https://censusreporter.org/data/map/?table=B19013&geo_ids=05000US53047,140|05000US53047&primary_geo_id=05000US53047#column|B19013001,sumlev|140
+https://censusreporter.org/data/map/?table=B19013&geo_ids=05000US53047,140|05000US53047&primary_geo_id=05000US53047#column|B19013001,sumlev|140
+
+```{r}
+fips <-
+  ussf::boundaries() %>% 
+  select(STATEFP, STUSPS) %>% 
+  mutate(STATEFP = as.double(STATEFP))
+
+sit209_id <-
+  sit209 %>%
+  filter(!is.na(POO_STATE_CODE)) %>% 
+  left_join(fips, by = c("POO_STATE_CODE" = "STATEFP")) %>% 
+  mutate(
+    year = lubridate::year(DISCOVERY_DATE),
+    month = lubridate::month(DISCOVERY_DATE),
+    day = lubridate::day(DISCOVERY_DATE),
+    id = as.character(str_glue("{year}{month}{day}{STUSPS}"))
+  )
+```
+
+# TODOS
+
+* Assign each tract an SVI bucket. For example: 0, (0, .1], (.1, .2], ... 1
+* Count the number of fires within those buckets
+* Add other features for each bucket, for example: average cost, average size, average homes threatened...maybe medians too
+
+```{r}
+svi_buckets <-
+  svi_2014 %>% 
+  filter(RPL_THEMES != -999) %>% 
+  mutate(
+    bucket =
+      case_when(
+        RPL_THEMES == 1 ~ 1,
+        RPL_THEMES > 0.95 ~ 0.95,
+        RPL_THEMES > 0.9 ~ 0.9,
+        RPL_THEMES > 0.85 ~ 0.85,
+        RPL_THEMES > 0.8 ~ 0.8,
+        RPL_THEMES > 0.75 ~ 0.75,
+        RPL_THEMES > 0.7 ~ 0.7,
+        RPL_THEMES > 0.65 ~ 0.65,
+        RPL_THEMES > 0.6 ~ 0.6,
+        RPL_THEMES > 0.55 ~ 0.55,
+        RPL_THEMES > 0.5 ~ 0.5,
+        RPL_THEMES > 0.45 ~ 0.45,
+        RPL_THEMES > 0.4 ~ 0.4,
+        RPL_THEMES > 0.35 ~ 0.35,
+        RPL_THEMES > 0.3 ~ 0.3,
+        RPL_THEMES > 0.25 ~ 0.25,
+        RPL_THEMES > 0.2 ~ 0.2,
+        RPL_THEMES > 0.15 ~ 0.15,
+        RPL_THEMES > 0.1 ~ 0.1,
+        RPL_THEMES > 0.05 ~ 0.05,
+        RPL_THEMES > 0 ~ 0,
+        RPL_THEMES == 0 ~ -0.05,
+      )
+  )
+
+```
+
+
+```{r}
+## THIS IS THE ONE TO ACTUALLY USE
+
+karen_sit_2 <-
+  sit209 %>% 
+    mutate(INC_IDENTIFIER = as.character(INC_IDENTIFIER)) %>% 
+    left_join(karen, by = c("INC_IDENTIFIER" = "ICS_209_INCIDENT_NUMBER")) %>% 
+    drop_na(MTBS_ID) %>% 
+    arrange(REPORT_TO_DATE) %>% 
+    group_by(MTBS_ID) %>% 
+    summarize(
+      cost = last(EST_IM_COST_TO_DATE),
+      homes_destroyed = last(SFR_DESTROYED),
+      homes_damaged = last(SFR_DAMAGED),
+      homes_threatened = last(SFR_THREATENED_72),
+      acres = last(CURR_INCIDENT_AREA),
+      cost_per_acre = cost / acres,
+      homes_destroyed_per_acre = homes_destroyed / acres,
+      homes_damaged_per_acre = homes_damaged / acres,
+      homes_threatened_per_acre = homes_threatened / acres
+    )
+
+ids <- karen_sit_2 %>% arrange(MTBS_ID) %>% pull(MTBS_ID)
+
+sit209_geo <-
+  fires %>% 
+  arrange(Fire_ID) %>% 
+  filter(Fire_ID %in% ids) %>% 
+  bind_cols(karen_sit_2 )
+```
+
+
+```{r}
+bucket_take_2 <-
+  sit209_geo %>% 
+  filter(Year %in% (c(2014, 2015))) %>% 
+  st_join(svi_buckets) %>% 
+  group_by(bucket) %>% 
+  summarize(
+    total_acres = sum(acres, na.rm = TRUE),
+    total_cost = sum(cost, na.rm = TRUE),
+    total_homes_destroyed = sum(homes_destroyed, na.rm = TRUE),
+    total_homes_threatened = sum(homes_threatened, na.rm = TRUE),
+    total_homes_damaged = sum(homes_damaged, na.rm = TRUE),
+    total_fires = n()
+  ) %>% 
+  mutate(
+    cost_per_acre = total_cost / total_acres,
+    cost_per_fire = total_cost / total_fires,
+    cost_per_home_threatened = total_cost / total_homes_threatened
+  )
+```
+
+
+```{r}
+summary(bucket_take_2)
+```
+
+
+```{r}
+bucket_take_2 %>% 
+  ggplot() +
+  geom_col(aes(y = cost_per_acre, x = bucket), position = "dodge")
+```
+
+
+
+```{r}
+bucket_take_2 %>% 
+  ggplot() +
+  geom_col(aes(y = cost_per_fire, x = bucket), position = "dodge")
+```
+
+
+
+```{r}
+bucket_take_2 %>% 
+  ggplot() +
+  geom_col(aes(y = total_cost, x = bucket), position = "dodge")
+```
+
+```{r}
+bucket_take_2 %>% 
+  ggplot() +
+  geom_col(aes(y = total_homes_threatened, x = bucket), position = "dodge")
+```
+
+
+```{r}
+bucket_take_2 %>% 
+  ggplot() +
+  geom_point(aes(x = total_acres, y = total_cost, color = bucket), size = 3) +
+  scale_color_viridis_c()
+```
+
+* Should we look at county or Census tract? Problems with sampling error.
+* Karen Short's data: It never gets updated. It doesn't match with federal numbers because she goes to every state to ask for state fire data. The states also often collect local data. Federal data usually only covers 1) fires on federal land and 2) fires that are so big the feds have to respond to it. There's a lot of noise because of the small fires. 
+* Disaster response happens at the county level. 
+* Use urban-rural classification system to determine which fires are in populated places
+* SYLVIS LAB_ WUI = densely populated places with fires
+
+

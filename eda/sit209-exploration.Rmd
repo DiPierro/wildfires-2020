@@ -1,0 +1,279 @@
+---
+title: Exploring the SIT-209
+author: Amy DiPierro
+date: "`r Sys.Date()`"
+output: 
+  github_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Libraries
+library(tidyverse)
+library(sf)
+
+# Parameters
+
+# Monitoring Trends in Burn Severity: Burned Areas Boundary Dataset
+# Source: https://www.mtbs.gov/direct-download
+# Download date: 2020-04-21
+# Geography: United States
+# Years: 2006 - 2017
+file_fires <- here::here("data-raw", "mtbs_perimeter_data", "mtbs_perims_DD.shp")
+
+# SIT-209: 2014 - 2017
+# Source: BigLocalNews
+# Download date: 2020-04-22
+# Years: 2014 - 2017
+url_sit209 <- "https://stacks.stanford.edu/file/druid:xj043rd8767/xj043rd8767_fire_reports_2014-2017.csv"
+
+#===============================================================================
+
+# Code
+
+# Read in the fire shapefile data
+fires <-
+  read_sf(file_fires)
+
+# Read in the SVI data
+sit209 <- 
+  read_csv(url_sit209)
+
+# Variables to select
+quantity <- tidyselect::vars_select(names(sit209), contains("QUANTITY"))
+personnel <- tidyselect::vars_select(names(sit209), contains("PERSONNEL"))
+destroyed <- tidyselect::vars_select(names(sit209), contains("DESTROYED"))
+damaged <- tidyselect::vars_select(names(sit209), contains("DAMAGED"))
+threatened <- tidyselect::vars_select(names(sit209), contains("THREATENED"))
+
+# States
+us <-
+  ussf::boundaries(
+    geography = "state", 
+    projection = "longlat",
+  ) %>% 
+  filter(!NAME %in% c("Alaska", "Hawaii"))
+
+```
+
+# Wrangle SIT-209
+
+Each row in this dataset appears to be an incremental report of a fire, rather than a report about the total resources the fire has required and the destruction it has wrought.
+
+To determine the total cost, therefore, we'll find the maximum number of homes destroyed and the maximum cost for each unique fire identifier.
+
+
+```{r}
+sit209 %>% 
+  group_by(INCIDENT_NAME, INC_IDENTIFIER) %>% 
+  summarize(
+    cost = max(EST_IM_COST_TO_DATE, na.rm = TRUE),
+    homes_destroyed = max(SFR_DESTROYED, na.rm = TRUE),
+    homes_damaged = max (SFR_DAMAGED, na.rm = TRUE),
+    homes_threatened = max(SFR_THREATENED_72, na.rm = TRUE),
+    acres = max(CURR_INCIDENT_AREA),
+    cost_per_acre = cost / acres,
+    homes_destroyed_per_acre = homes_destroyed / acres,
+    homes_damaged_per_acre = homes_damaged / acres,
+    homes_threatened_per_acre = homes_threatened / acres
+  ) %>%
+  filter(homes_threatened > 0, cost > 0) %>% 
+  ggplot(aes(x = log2(homes_threatened_per_acre), y = log2(cost_per_acre))) +
+  geom_hex() +
+  geom_smooth() +
+  scale_fill_viridis_c()
+```
+
+```{r}
+sit209 %>% 
+  filter(INC_IDENTIFIER == 7293180) %>% 
+  arrange(REPORT_FROM_DATE)
+```
+
+```{r}
+sit209 %>% 
+  group_by(INCIDENT_NAME, INC_IDENTIFIER) %>% 
+  arrange(REPORT_FROM_DATE) %>% 
+  summarize(
+    cost = last(EST_IM_COST_TO_DATE)
+  ) %>%
+  drop_na(cost) %>% 
+  head(10)
+```
+
+```{r}
+sit209 %>% 
+  group_by(INCIDENT_NAME, INC_IDENTIFIER) %>% 
+  arrange(REPORT_FROM_DATE) %>% 
+  summarize(
+    cost = max(EST_IM_COST_TO_DATE, na.rm = TRUE)
+  ) %>%
+  filter(cost > 0) %>%  
+  head(10)
+```
+
+```{r}
+sit209 %>% filter(!is.na(POO_LATITUDE)) %>% distinct(INC_IDENTIFIER)
+```
+
+
+```{r}
+sit209 %>% 
+  group_by(INCIDENT_NAME, INC_IDENTIFIER) %>% 
+  summarize(
+    cost = max(EST_IM_COST_TO_DATE, na.rm = TRUE),
+    homes_destroyed = max(SFR_DESTROYED, na.rm = TRUE),
+    homes_damaged = max(SFR_DAMAGED, na.rm = TRUE),
+    homes_threatened = max(SFR_THREATENED_72, na.rm = TRUE),
+    acres = max(CURR_INCIDENT_AREA),
+    cost_per_acre = cost / acres,
+    homes_destroyed_per_acre = homes_destroyed / acres,
+    homes_damaged_per_acre = homes_damaged / acres,
+    homes_threatened_per_acre = homes_threatened / acres
+  ) %>% 
+  filter(
+    homes_destroyed > 10,
+    acres > 0,
+    cost > 0
+  ) %>% 
+  arrange(desc(homes_destroyed_per_acre))
+```
+
+```{r}
+sit209 %>% 
+  filter(INC_IDENTIFIER == 590661)
+```
+
+```{r}
+sit209 %>% 
+  filter(INC_IDENTIFIER %in% c(4327598, 7292820)) %>% 
+  count(INCIDENT_NAME, DISCOVERY_DATE)
+```
+
+
+
+```{r}
+sfr_destroyed <-
+  sit209 %>% 
+  filter(SFR_DESTROYED > 0) %>% 
+  group_by(INCIDENT_NAME, DISCOVERY_DATE) %>% 
+  mutate(
+    homes_destroyed = sum(SFR_DESTROYED, na.rm = TRUE),
+    cost = max(EST_IM_COST_TO_DATE, na.rm = TRUE)
+  ) %>% 
+  select(INCIDENT_NAME, DISCOVERY_DATE, POO_LATITUDE, POO_LONGITUDE, cost, homes_destroyed) %>% 
+  distinct(INCIDENT_NAME, DISCOVERY_DATE, POO_LATITUDE, POO_LONGITUDE, cost, homes_destroyed)
+```
+
+Here, we convert lat and long to a geometry column for the purpose of the spatial join.
+
+```{r}
+sfr_destroyed_point <- st_as_sf(sfr_destroyed, coords = c("POO_LONGITUDE", "POO_LATITUDE"), crs = 4269, agr = "field")
+```
+
+Now, let's find the points that are within the fire perimeters.
+
+```{r}
+fire_perimeters <-
+  sfr_destroyed_point %>% 
+  st_intersection(fires)
+```
+
+```{r}
+sfr_destroyed %>% 
+  ggplot(aes(x = homes_destroyed, y = cost)) +
+  geom_point()
+```
+
+```{r}
+sfr_destroyed %>% 
+  filter(homes_destroyed > 5000)
+```
+
+
+```{r}
+sfr_destroyed %>% 
+  ggplot(aes(cost)) +
+  geom_histogram()
+```
+
+
+
+```{r}
+
+
+common_ids <-
+  fire_perimeters %>% 
+  arrange(Fire_ID) %>% 
+  pull(Fire_ID)
+
+fires %>% 
+  filter(Fire_ID %in% common_ids) %>% 
+  arrange(Fire_ID)
+```
+
+
+```{r}
+fire_perimeters %>% 
+  ggplot() +
+  geom_sf(data = us) +
+  geom_sf() 
+  
+```
+
+# Misc
+
+```{r}
+fips <-
+  ussf::boundaries() %>% 
+  select(STATEFP, STUSPS) %>% 
+  mutate(STATEFP = as.double(STATEFP))
+
+sit209_id <-
+  sit209 %>%
+  filter(!is.na(POO_STATE_CODE)) %>% 
+  left_join(fips, by = c("POO_STATE_CODE" = "STATEFP")) %>% 
+  mutate(
+    year = lubridate::year(DISCOVERY_DATE),
+    month = lubridate::month(DISCOVERY_DATE),
+    day = lubridate::day(DISCOVERY_DATE),
+    id = as.character(str_glue("{year}{month}{day}{STUSPS}"))
+  )
+```
+
+
+```{r}
+fires_id <-
+  fires %>% 
+  mutate(
+    state = str_sub(Fire_ID, end = 2),
+    id = as.character(str_glue("{Year}{StartMonth}{StartDay}{state}"))
+  )
+  
+```
+
+```{r}
+fires_id %>% 
+  left_join(sit209_id, by = c("id")) %>% 
+  select(STUSPS, POO_CITY, POO_SHORT_LOCATION_DESC, state)
+```
+
+```{r}
+sit209 %>% 
+  count(is.na(POO_STATE_CODE))
+```
+
+
+```{r}
+sit209 %>% 
+  group_by(INCIDENT_NAME, DISCOVERY_DATE, POO_STATE_CODE) %>% 
+  summarize_at(vars(destroyed), max, na.rm = TRUE) %>%
+  mutate(
+    total_destroyed = COMMERCIAL_DESTROYED + MFR_DESTROYED + OUTBUILDINGS_DESTROYED + MIXED_USE_DESTROYED + SFR_DESTROYED
+  ) %>% 
+  arrange(desc(SFR_DESTROYED))
+```

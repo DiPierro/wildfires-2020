@@ -32,6 +32,12 @@ file_svi <- here::here("data-raw", "SVI2018_US", "SVI2018_US_tract.shp")
 # Years: 2006 - 2017
 file_fires <- here::here("data-raw", "mtbs_perimeter_data", "mtbs_perims_DD.shp")
 
+# SIT-209: 2014 - 2017
+# Source: BigLocalNews
+# Download date: 2020-04-22
+# Years: 2014 - 2017
+url_sit209 <- "https://stacks.stanford.edu/file/druid:xj043rd8767/xj043rd8767_fire_reports_2014-2017.csv"
+
 #===============================================================================
 
 # Code
@@ -43,6 +49,10 @@ svi <-
 # Read in the fire shapefile data
 fires <-
   read_sf(file_fires)
+
+# Read in the SIT-209 data
+sit209 <-
+  read_csv(url_sit209)
 
 # States
 us <-
@@ -117,6 +127,45 @@ svi %>%
   geom_boxplot(aes(y = RPL_THEMES))
 ```
 
+## SIT-209
+
+```{r}
+colnames(sit209)
+```
+
+```{r}
+sit209_filtered <-
+  sit209 %>% 
+  select(
+    DISCOVERY_DATE,
+    INCIDENT_NAME,
+    POO_CITY,
+    INC_IDENTIFIER,
+    `RESPONDER_Require Immunizations_TO_DATE`,
+    `RESPONDER_In Quarantine_TO_DATE`,
+    `RESPONDER_In Quarantine_THIS_REP_PERIOD`,
+    `RESPONDER_Require Immunizations_THIS_REP_PERIOD`,
+    `QUARANTINE_IN_PROGRESS`,
+    `MASS_IMMUNIZATION_COMPLETE`
+  ) 
+
+sit209_filtered %>% 
+  filter_at(
+    vars(
+      `RESPONDER_Require Immunizations_TO_DATE`,
+      `RESPONDER_In Quarantine_TO_DATE`,
+      `RESPONDER_In Quarantine_THIS_REP_PERIOD`,
+      `RESPONDER_Require Immunizations_THIS_REP_PERIOD`,
+      `QUARANTINE_IN_PROGRESS`,
+      `MASS_IMMUNIZATION_COMPLETE`
+    ),
+    any_vars(!is.na(.))
+  )
+```
+
+
+
+
 
 # Data preparation
 
@@ -162,6 +211,7 @@ low_vulnerability_fires <-
   st_intersection(low_vulnerability) %>% 
   filter(!ST_ABBR %in% c("AK", "HI"))
 ```
+
 
 # Mapping
 

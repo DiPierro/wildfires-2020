@@ -1,0 +1,381 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# Libraries
+library(tidyverse)
+library(jsonlite)
+library(sf)
+
+# Parameters
+
+## SIT-209
+file_sit209 <- here::here("data-raw", "wildfires_deduped.csv")
+
+#===============================================================================
+
+# Code
+
+# Read in the SIT-209 data
+sit209 <-
+  file_sit209 %>% 
+  read_csv(
+    col_types = 
+      cols(
+        .default = col_character(),
+        LATITUDE = col_double(),
+        LONGITUDE = col_double(),
+        ESTIMATED_COST = col_double(),
+        REPORT_DATE = col_datetime(format = ""),
+        MAX_PERSONNEL = col_double(),
+        INCIDENT_AREA = col_double(),
+        MAX_SFR_THREAT = col_double(),
+        MAX_MFR_THREAT = col_double(),
+        MAX_MU_THREAT = col_double(),
+        MAX_COMM_THREAT = col_double(),
+        MAX_OUTB_THREAT = col_double(),
+        MAX_OTHER_THREAT = col_double(),
+        SFR_DAMAGED = col_double(),
+        MFR_DAMAGED = col_double(),
+        MU_DAMAGED = col_double(),
+        COMM_DAMAGED = col_double(),
+        OTHER_DAMAGED = col_double(),
+        SFR_DESTROYED = col_double(),
+        MFR_DESTROYED = col_double(),
+        MU_DESTROYED = col_double(),
+        COMM_DESTROYED = col_double(),
+        OUTB_DESTROYED = col_double(),
+        OTHER_DESTROYED = col_double(),
+        INJURIES = col_double(),
+        FATALITIES = col_double(),
+        REPORT_ID = col_character(),
+        WILDFIRE = col_logical(),
+        STATE_FIPS = col_character(),
+        DESTROYED = col_logical(),
+        THREATENED = col_logical(),
+        CLIMATE_REGION = col_character()
+      )
+  )
+```
+
+```{r}
+colnames(sit209)
+```
+
+```{r}
+summary(sit209) 
+```
+
+Filter just to wildfires that have destroyed at least one building:
+
+```{r}
+sit209_destroyed <-
+  sit209 %>% 
+  filter(
+    WILDFIRE == TRUE,
+    DESTROYED == TRUE
+  )
+```
+
+Explore the extent of single-family home destruction:
+
+```{r}
+sit209_destroyed %>% 
+  filter(is.na(SFR_DESTROYED))
+```
+
+There are still lots of cases in which a building was destroyed, but not homes.
+
+```{r}
+sit209_destroyed %>% 
+  drop_na(SFR_DESTROYED) %>% 
+  ggplot() +
+  geom_boxplot(aes(y = SFR_DESTROYED))
+```
+
+Are the two super-outliers legit?
+
+```{r}
+sit209_destroyed %>% 
+  arrange(desc(SFR_DESTROYED))
+```
+
+Yup, this looks about right to me.
+
+Zoom in to try to see reasonable categories.
+
+
+```{r}
+top_destroyed <-
+  sit209_destroyed %>% 
+  top_n(n = 100, wt = SFR_DESTROYED)
+```
+
+```{r}
+sit209 %>% 
+  group_by(COUNTY, STATE) %>% 
+  summarize(
+    total_homes_destroyed = sum(SFR_DESTROYED, na.rm = TRUE),
+    total_homes_damaged = sum(SFR_DAMAGED, na.rm = TRUE),
+    total_fires = n()
+  )
+```
+
+```{r}
+sit209 %>% 
+  count(is.na(STATE_FIPS))
+```
+
+Geocode attempt 1:
+
+```{r}
+sit_209_api <-
+  sit209 %>%
+  drop_na(LATITUDE, LONGITUDE) %>% 
+  mutate(
+    LATITUDE = if_else(LATITUDE < 0, LATITUDE * -1, LATITUDE),
+    LONGITUDE = if_else(LONGITUDE > 0, LONGITUDE * -1, LONGITUDE),
+    geo_url = str_c("https://geocoding.geo.census.gov/geocoder/geographies/coordinates?x=", LONGITUDE,"&y=", LATITUDE, "&benchmark=Public_AR_Current&vintage=Current_Current&layer=10&format=json")
+  )  
+
+url_to_county <- function(x) {
+  fromJSON(x)[["result"]][["geographies"]][[1]][["COUNTY"]]
+}
+
+sit_209_geocoded <-
+  sit_209_api %>% 
+  head(10) %>% 
+  mutate(
+    county_lat_long = map(geo_url, url_to_county),
+    county_lat_long = pluck(county_lat_long, 1)
+  ) 
+  
+```
+
+Geocode attempt 2:
+
+```{r}
+counties <- 
+  ussf::boundaries(geography = c("county"), projection = c("longlat")) %>% 
+  st_transform(crs = 4269)
+
+sit209_sf <-
+  sit209 %>% 
+  drop_na(LONGITUDE, LATITUDE) %>% 
+  filter(SFR_DESTROYED > 0) %>% 
+  mutate(
+    LATITUDE = if_else(LATITUDE < 0, LATITUDE * -1, LATITUDE),
+    LONGITUDE = if_else(LONGITUDE > 0, LONGITUDE * -1, LONGITUDE)
+  ) %>% 
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4269)
+
+```
+
+```{r}
+lat_long_counties <- 
+  st_intersection(counties, sit209_sf) %>%
+  st_set_geometry(NULL) %>% 
+  select(
+    GEOID, 
+    NAME,
+    colnames(sit209 %>% select(-LONGITUDE, -LATITUDE)),
+    -COUNTY
+  )
+```
+
+```{r}
+# Places with county names left over
+
+other_counties <-
+  sit209 %>% 
+  filter(SFR_DESTROYED > 0) %>% 
+  filter(is.na(LONGITUDE) | is.na(LATITUDE)) %>% 
+  mutate(
+    COUNTY = str_to_title(COUNTY),
+    STATE_FIPS = map(STATE_FIPS, ~ if_else(length(.) < 2, str_c("0", .),.)),
+    STATE_FIPS = pluck(STATE_FIPS, 1)
+  ) %>% 
+  left_join(counties, by = c("COUNTY" = "NAME", "STATE_FIPS" = "STATEFP")) %>% 
+  drop_na(COUNTYFP) %>% 
+  select(
+    GEOID, 
+    NAME = "COUNTY",
+    colnames(sit209 %>% select(-LONGITUDE, -LATITUDE))
+  )
+```
+
+
+```{r}
+joined <-
+  bind_rows(other_counties, lat_long_counties)
+```
+
+
+
+
+
+```{r}
+sit209_and_spatial <-
+  sit209 %>% 
+  left_join(sit209_spatial, by = c("INTERNAL_DB_ID"))
+```
+
+
+```{r}
+
+county_list <-
+  ussf::boundaries(geography = "county") %>% pull(NAME)
+
+fips_list <-
+  ussf::boundaries(geography = "county") %>% pull(GEOID)
+
+sit209_almost_recoded <-
+  sit209_and_spatial %>% 
+  mutate(
+    county_dbl = as.double(COUNTY),
+    county_chr = as.character(COUNTY),
+    county_chr_valid = if_else(county_chr %in% counties$NAME, county_chr, "Check original"),
+    county_fips_constructed = 
+      if_else(!is.na(county_dbl), as.character(str_glue("{STATE_FIPS}{county_dbl}")), NA_character_),
+    county_recode = 
+      case_when(
+        is.na(county_chr) & (is.na(LATITUDE) | is.na(LONGITUDE)) & is.na(county_dbl) ~ NA_character_,
+        !(is.na(LATITUDE) & is.na(LONGITUDE)) ~ GEOID,
+        is.na(county_chr) & (is.na(LATITUDE) | is.na(LONGITUDE)) & !is.na(county_fips_constructed) ~ county_fips_constructed,
+        !is.na(county_chr_valid) & (is.na(LATITUDE) | is.na(LONGITUDE)) & is.na(county_dbl) ~ county_chr_valid,
+        TRUE ~ NA_character_
+      )
+  ) # TODO: match every county_chr_valid and state to a GEOID
+#remove all 0s from GEOIDs?
+```
+
+```{r}
+sit209_almost_recoded %>% 
+  summarize_all(~ sum(is.na(.)))
+```
+
+
+# THE NEW PLAN:
+* Limit only to the top 100 fires in terms of SF home construction
+* Find the counties based on Lat/Long (remember to flip them)
+* For the remaining: 1) assign a GEOID based on name or 2) try to find them manually
+
+```{r}
+top_destroyed_point <-
+  top_destroyed %>%
+  drop_na(LATITUDE, LONGITUDE) %>% 
+  mutate(
+    LATITUDE = if_else(LATITUDE < 0, LATITUDE * -1, LATITUDE),
+    LONGITUDE = if_else(LONGITUDE > 0, LONGITUDE * -1, LONGITUDE)
+  ) %>% 
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4269)
+
+counties <- 
+  ussf::boundaries(geography = c("county"), projection = c("longlat")) %>% 
+  st_transform(crs = 4269)
+
+top_destroyed_counties <- 
+  st_join(top_destroyed_point, counties, join = st_within)
+```
+
+```{r}
+joined %>% 
+  count(GEOID, NAME, STATE, sort = TRUE)
+```
+
+
+
+```{r}
+top_summarized <-
+  top_destroyed_counties %>% 
+  group_by(NAME, STATE) %>%
+  summarize(
+    total_cost = sum(ESTIMATED_COST, na.rm = TRUE),
+    total_acres = sum(INCIDENT_AREA, na.rm = TRUE),
+    total_homes_destroyed = sum(SFR_DESTROYED, na.rm = TRUE),
+    total_homes_damaged = sum(SFR_DAMAGED, na.rm = TRUE),
+    total_fires = n(),
+    total_personnel = sum(MAX_PERSONNEL, na.rm = TRUE)
+  )
+```
+
+
+```{r}
+joined_summarized <-
+  joined %>% 
+  mutate(
+    GEOID = 
+      case_when(
+        NAME == "Washington" & STATE == "OK" ~ "40147",
+        NAME == "Jackson" & STATE == "FL" ~ "12063",
+        NAME == "Jackson" & STATE == "NC" ~ "37099",
+        NAME == "Marion" & STATE == "MS" ~ "28091"
+      )
+  ) %>% 
+  group_by(NAME, STATE, GEOID) %>%
+  summarize(
+    total_cost = sum(ESTIMATED_COST, na.rm = TRUE),
+    total_acres = sum(INCIDENT_AREA, na.rm = TRUE),
+    total_homes_destroyed = sum(SFR_DESTROYED, na.rm = TRUE),
+    total_homes_damaged = sum(SFR_DAMAGED, na.rm = TRUE),
+    total_fires = n(),
+    total_personnel = sum(MAX_PERSONNEL, na.rm = TRUE)
+  ) 
+```
+
+
+
+
+```{r}
+joined_summarized %>% arrange(desc(total_acres))
+```
+
+
+```{r}
+joined_summarized %>% 
+  filter(total_acres < 3e+06) %>% 
+  ggplot() +
+  geom_point(aes(x = total_acres, y = total_cost))
+```
+
+
+```{r}
+joined_summarized %>% 
+  ggplot() +
+  geom_histogram(aes(total_personnel))
+```
+
+```{r}
+joined_summarized %>% 
+  arrange(desc(total_personnel))
+```
+
+
+```{r}
+joined_summarized %>% 
+  ggplot() +
+  geom_histogram(aes(total_cost))
+```
+
+```{r}
+joined_summarized %>% 
+  ggplot() +
+  geom_histogram(aes(total_homes_destroyed))
+```
+
+```{r}
+joined_summarized %>% 
+  arrange(desc(total_homes_destroyed)) %>% 
+  select(NAME, STATE, total_homes_destroyed, total_fires)
+```
+
+```{r}
+joined_summarized 
+```
+
+```{r}
+joined_summarized
+```
+

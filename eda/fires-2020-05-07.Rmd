@@ -1,0 +1,766 @@
+---
+title: fires-2020-05-07
+author: 
+date: "`r Sys.Date()`"
+output: 
+  github_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Libraries
+library(tidyverse)
+library(sf)
+library(lwgeom)
+
+# Parameters
+
+# FRAP
+# CALFIRE perimeters
+# Source: https://frap.fire.ca.gov/frap-projects/fire-perimeters/
+file_frap <- here::here("data-raw", "fire19_1.gdb")
+
+# Directory of tract shapefiles
+dir_nhgis <- here::here("data-raw", "nhgis0001_shape")
+
+# SIT-209
+file_sit209 <- here::here("data-raw", "wildfires_deduped.csv")
+
+#===============================================================================
+
+# Code
+
+# Read in the FRAP data
+frap <-
+  st_read(dsn = file_frap, layer = "firep19_1") %>% 
+  as_data_frame() %>% 
+  st_as_sf() 
+
+# List of files in the NHGIS directory
+dir_list <- fs::dir_ls(dir_nhgis)
+
+# Read in each of the files in the NHGIS directory
+tracts_2000 <- read_sf(dir_list[1])
+tracts_2010 <- read_sf(dir_list[2])
+tracts_2011 <- read_sf(dir_list[3])
+tracts_2012 <- read_sf(dir_list[4])
+tracts_2013 <- read_sf(dir_list[5])
+tracts_2014 <- read_sf(dir_list[6])
+tracts_2015 <- read_sf(dir_list[7])
+tracts_2016 <- read_sf(dir_list[8])
+tracts_2017 <- read_sf(dir_list[9])
+# This doesn't read in; I have to diagnose why
+# TODO: Find different boundaries
+# tracts_2018 <- read_sf(dir_list[10])
+
+# Read in the SIT-209 data
+sit209 <-
+  file_sit209 %>% 
+  read_csv(
+    col_types = 
+      cols(
+        .default = col_character(),
+        LATITUDE = col_double(),
+        LONGITUDE = col_double(),
+        #START_DATE = col_datetime(format = "%m/%d/%y 00:00:00"),
+        ESTIMATED_COST = col_double(),
+        REPORT_DATE = col_datetime(format = ""),
+        MAX_PERSONNEL = col_double(),
+        INCIDENT_AREA = col_double(),
+        MAX_SFR_THREAT = col_double(),
+        MAX_MFR_THREAT = col_double(),
+        MAX_MU_THREAT = col_double(),
+        MAX_COMM_THREAT = col_double(),
+        MAX_OUTB_THREAT = col_double(),
+        MAX_OTHER_THREAT = col_double(),
+        SFR_DAMAGED = col_double(),
+        MFR_DAMAGED = col_double(),
+        MU_DAMAGED = col_double(),
+        COMM_DAMAGED = col_double(),
+        OTHER_DAMAGED = col_double(),
+        SFR_DESTROYED = col_double(),
+        MFR_DESTROYED = col_double(),
+        MU_DESTROYED = col_double(),
+        COMM_DESTROYED = col_double(),
+        OUTB_DESTROYED = col_double(),
+        OTHER_DESTROYED = col_double(),
+        INJURIES = col_double(),
+        FATALITIES = col_double(),
+        REPORT_ID = col_character(),
+        WILDFIRE = col_logical(),
+        STATE_FIPS = col_character(),
+        DESTROYED = col_logical(),
+        THREATENED = col_logical(),
+        CLIMATE_REGION = col_character()
+      )
+  )
+```
+
+### Join the tract-level data together
+
+Now that we've read in all of the tract data, let's join the files into one tibble.
+
+```{r}
+# tracts <-
+#   rbind(
+#     tracts_2000 %>% mutate(year = 2000) %>% select(year, GEOID = CTIDFP00),
+#     tracts_2010 %>% mutate(year = 2010) %>% select(year, GEOID = GEOID10),
+#     tracts_2011 %>% mutate(year = 2011) %>% select(year, GEOID),
+#     tracts_2012 %>% mutate(year = 2012) %>% select(year, GEOID),
+#     tracts_2013 %>% mutate(year = 2013) %>% select(year, GEOID),
+#     tracts_2014 %>% mutate(year = 2014) %>% select(year, GEOID),
+#     tracts_2015 %>% mutate(year = 2015) %>% select(year, GEOID),
+#     tracts_2016 %>% mutate(year = 2016) %>% select(year, GEOID),
+#     tracts_2017 %>% mutate(year = 2017) %>% select(year, GEOID)
+#   ) %>% 
+#   filter(str_starts(GEOID, "06")) # Limits us to tracts in California.
+```
+
+As an optional step, we'll write out this tibble for future use.
+
+```{r}
+# tracts %>% write_sf(path = here::here("data", "ca_tracts_2000_2017"))
+```
+
+### FRAP
+
+First, I prepare the FRAP data to be joined to the Census tract data:
+
+* I convert `YEAR_` to an integer from a factor.
+* After a quick check, it looks like neither FIRE_NUM, nor INC_NUM, nor FIRE_NAME in a given year are unique, so I make our own unique id.
+* I fiddle with the geography column a little to avoid errors.
+* I toss out duplicate values
+
+```{r}
+frap_prepped <-
+  frap %>% 
+  mutate(
+    YEAR_ = as.integer(as.character(YEAR_)),
+    ALARM_DATE = 
+      if_else(is.na(ALARM_DATE), "no_date", as.character(ALARM_DATE)),
+    FIRE_NAME = 
+      if_else(is.na(FIRE_NAME), "no_name", as.character(FIRE_NAME)),
+    INC_NUM = 
+      if_else(is.na(INC_NUM), "no_inc_num", as.character(INC_NUM)),
+    GIS_ACRES = 
+      if_else(is.na(GIS_ACRES), "no_acres", as.character(GIS_ACRES)),
+    unique_id = 
+      str_c(
+        ALARM_DATE,
+        FIRE_NAME,
+        INC_NUM,
+        GIS_ACRES
+      )
+  ) %>% 
+  st_cast("MULTIPOLYGON") %>% # Cast to the same type as the tracts
+  st_make_valid() %>% 
+  distinct(unique_id, .keep_all = TRUE)
+```
+
+Let's try to join just 2000 census tract boundaries to the frap data.
+
+```{r}
+frap_2000 <-
+  frap_prepped %>% 
+  filter(
+    YEAR_ <= 2009,
+    YEAR_ >= 2000
+  )
+
+frap_tracts_2000 <-
+  tracts_2000 %>% 
+  filter(STATEFP00 == "06") %>% # Limit to California Census tracts
+  select(GEOID = CTIDFP00) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(frap_2000)
+```
+
+Check that no duplicates were created:
+
+```{r}
+frap_tracts_2000 %>% 
+  st_drop_geometry() %>% 
+  count(unique_id, GEOID, sort = TRUE) %>% 
+  filter(n > 1)
+```
+
+We combine 2010:
+
+```{r}
+frap_2010 <-
+  frap_prepped %>% 
+  filter(YEAR_ == 2010)
+
+frap_tracts_2010 <-
+  tracts_2010 %>% 
+  filter(STATEFP10 == "06") %>% # Limit to California Census tracts
+  select(GEOID = GEOID10) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(frap_2010)
+```
+
+Check for problems: 
+
+```{r}
+frap_tracts_2010 %>% 
+  st_drop_geometry() %>% 
+  count(unique_id, GEOID, sort = TRUE) %>% 
+  filter(n > 1)
+```
+
+We combine 2011:
+
+```{r}
+frap_2011 <-
+  frap_prepped %>% 
+  filter(YEAR_ == 2011)
+
+frap_tracts_2011 <-
+  tracts_2011 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(frap_2011)
+```
+
+Check for problems: 
+
+```{r}
+frap_tracts_2011 %>% 
+  st_drop_geometry() %>% 
+  count(unique_id, GEOID, sort = TRUE) %>% 
+  filter(n > 1)
+```
+
+We combine 2012:
+
+```{r}
+frap_2012 <-
+  frap_prepped %>% 
+  filter(YEAR_ == 2012)
+
+frap_tracts_2012 <-
+  tracts_2012 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(frap_2012)
+```
+
+Check for problems: 
+
+```{r}
+frap_tracts_2012 %>% 
+  st_drop_geometry() %>% 
+  count(unique_id, GEOID, sort = TRUE) %>% 
+  filter(n > 1)
+```
+
+We combine 2013:
+
+```{r}
+frap_2013 <-
+  frap_prepped %>% 
+  filter(YEAR_ == 2013)
+
+frap_tracts_2013 <-
+  tracts_2013 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(frap_2013)
+```
+
+Check for problems: 
+
+```{r}
+frap_tracts_2013 %>% 
+  st_drop_geometry() %>% 
+  count(unique_id, GEOID, sort = TRUE) %>% 
+  filter(n > 1)
+```
+
+We combine 2014:
+
+```{r}
+frap_2014 <-
+  frap_prepped %>% 
+  filter(YEAR_ == 2014)
+
+frap_tracts_2014 <-
+  tracts_2014 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(frap_2014)
+```
+
+Check for problems: 
+
+```{r}
+frap_tracts_2014 %>% 
+  st_drop_geometry() %>% 
+  count(unique_id, GEOID, sort = TRUE) %>% 
+  filter(n > 1)
+```
+
+We combine 2015:
+
+```{r}
+frap_2015 <-
+  frap_prepped %>% 
+  filter(YEAR_ == 2015)
+
+frap_tracts_2015 <-
+  tracts_2015 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(frap_2015)
+```
+
+Check for problems: 
+
+```{r}
+frap_tracts_2015 %>% 
+  st_drop_geometry() %>% 
+  count(unique_id, GEOID, sort = TRUE) %>% 
+  filter(n > 1)
+```
+
+We combine 2016:
+
+```{r}
+frap_2016 <-
+  frap_prepped %>% 
+  filter(YEAR_ == 2016)
+
+frap_tracts_2016 <-
+  tracts_2016 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(frap_2016)
+```
+
+Check for problems: 
+
+```{r}
+frap_tracts_2016 %>% 
+  st_drop_geometry() %>% 
+  count(unique_id, GEOID, sort = TRUE) %>% 
+  filter(n > 1)
+```
+
+We combine 2017:
+
+```{r}
+frap_2017 <-
+  frap_prepped %>% 
+  filter(YEAR_ == 2017)
+
+frap_tracts_2017 <-
+  tracts_2017 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(frap_2017)
+```
+
+Check for problems: 
+
+```{r}
+frap_tracts_2017 %>% 
+  st_drop_geometry() %>% 
+  count(unique_id, GEOID, sort = TRUE) %>% 
+  filter(n > 1)
+```
+
+Put it all together!
+
+```{r}
+frap_tracts <-
+  rbind(
+    frap_tracts_2000,
+    frap_tracts_2010,
+    frap_tracts_2011,
+    frap_tracts_2012,
+    frap_tracts_2013,
+    frap_tracts_2014,
+    frap_tracts_2015,
+    frap_tracts_2016,
+    frap_tracts_2017
+  )
+```
+
+Check for duplicates:
+
+```{r}
+frap_tracts %>% 
+  st_drop_geometry() %>% 
+  count(unique_id, GEOID, sort = TRUE) %>% 
+  filter(n > 1)
+```
+
+Get rid of the duplicates:
+
+```{r}
+frap_tracts_distinct <-
+  frap_tracts %>% 
+  distinct(unique_id, .keep_all = TRUE)
+  
+```
+
+Write out the final product:
+
+```{r}
+frap_tracts_distinct %>%
+  st_drop_geometry() %>% 
+  write_csv(here::here("data", "frap_tracts.csv"))
+```
+
+### SIT-209
+
+First, I prepare the SIT-209, filtering to just the data we need:
+
+* Wildfire incidents only
+* Wildfires in which at least one structure was destroyed
+* Only in California
+
+Then I take steps to help us to join this data with other datasets:
+
+* I transform latitude and longitude to correct any points that need to be standardized.
+* I make sure the COUNTY and STATE_FIPS columns are standardized to correspond to the frap_tracts_distinct dataframe.
+
+```{r}
+sit209_prepped <-
+  sit209 %>% 
+  filter(
+    WILDFIRE == TRUE,
+    DESTROYED == TRUE,
+    STATE == "CA"
+  ) %>% 
+  mutate( # Standardized latitude and longitude into the correct hemisphere
+    LATITUDE = if_else(LATITUDE < 0, LATITUDE * -1, LATITUDE),
+    LONGITUDE = if_else(LONGITUDE > 0, LONGITUDE * -1, LONGITUDE),
+    COUNTY = str_to_title(COUNTY),
+    STATE_FIPS = map(STATE_FIPS, ~ if_else(length(.) < 2, str_c("0", .),.)),
+    STATE_FIPS = pluck(STATE_FIPS, 1)
+  ) 
+```
+
+But here's the problem: There are often fires in the same county and month, so we couldn't join on these criteria alone.
+
+```{r}
+sit209_prepped %>%
+  mutate(
+    report_month = lubridate::month(REPORT_DATE),
+  ) %>% 
+  count(COUNTY, REPORT_YEAR, report_month, sort = TRUE)
+```
+
+This is true in the FRAP data, too.
+
+```{r}
+frap_tracts_distinct %>%
+  st_drop_geometry() %>% 
+  mutate(
+    ALARM_DATE = str_remove(ALARM_DATE, " 00:00:00"),
+    ALARM_DATE = parse_date(ALARM_DATE, format = "%Y-%m-%d"),
+    alarm_month = lubridate::month(ALARM_DATE),
+    county = str_sub(GEOID, 1L, 5L)
+  ) %>% 
+  count(county, alarm_month, YEAR_)
+```
+
+Counting units does not work any better:
+
+```{r}
+sit209_prepped %>% 
+  mutate(
+    report_month = lubridate::month(REPORT_DATE),
+    unit_id = str_extract(INCIDENT_NUMBER, "-\\w{3}-")
+  ) %>%
+  count(unit_id, REPORT_YEAR, report_month, sort = TRUE)
+```
+
+```{r}
+frap_tracts_distinct %>% 
+  st_drop_geometry() %>% 
+  mutate(
+    ALARM_DATE = str_remove(ALARM_DATE, " 00:00:00"),
+    ALARM_DATE = parse_date(ALARM_DATE, format = "%Y-%m-%d"),
+    alarm_month = lubridate::month(ALARM_DATE),
+    county = str_sub(GEOID, 1L, 5L)
+  ) %>% 
+  count(UNIT_ID, alarm_month, YEAR_, sort = TRUE)
+```
+
+So, maybe latitude and longitude are the ticket.
+
+First, let's check out how many of the points of origin given in the latitude and longitude are outside of California:
+
+```{r}
+sit209_prepped %>% 
+  # Use lat/long to make an sf object for spatial operations
+  drop_na(LONGITUDE, LATITUDE) %>% 
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4269) %>% 
+  st_difference(
+    ussf::boundaries(geography = c("state"), projection = c("longlat")) %>% 
+    st_transform(crs = 4269) %>% 
+    filter(STATEFP == "06")
+  ) %>% 
+  count(INCIDENT_NAME, INCIDENT_NUMBER, sort = TRUE)
+```
+
+Looks like there are 27 fires with the wrong latitude and longitude. 
+
+Then, there are 11 incidents where we don't have latitude or longitude:
+
+```{r}
+sit209_prepped %>% 
+  count(is.na(LATITUDE) | is.na(LONGITUDE))
+```
+
+So, in total, we'll have to place 48 fires manually. Let's filter out these misfits and then join the rest.
+
+```{r}
+wrong_points <-
+  sit209_prepped %>% 
+  # Use lat/long to make an sf object for spatial operations
+  drop_na(LONGITUDE, LATITUDE) %>% 
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4269) %>% 
+  st_difference(
+    ussf::boundaries(geography = c("state"), projection = c("longlat")) %>% 
+    st_transform(crs = 4269) %>% 
+    filter(STATEFP == "06")
+  ) %>% 
+  pull(INCIDENT_NUMBER)
+
+```
+
+* Join each tract year to sit209
+* Join SIT209 with tracts to FRAP on tracts
+
+```{r}
+sit209_points <-
+  sit209_prepped %>% 
+  filter(!INCIDENT_NUMBER %in% wrong_points) %>% 
+  drop_na(LONGITUDE, LATITUDE) %>% 
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 3310) %>% 
+  st_transform(crs = 3310)
+```
+
+
+```{r}
+sit209_tracts_2000 <-
+  tracts_2000 %>% 
+  filter(STATEFP00 == "06") %>% # Limit to California Census tracts
+  select(GEOID = CTIDFP00) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(sit209_points %>% filter(REPORT_YEAR <= 2000))
+```
+
+
+Let's do the rest:
+
+```{r}
+sit209_tracts_2010 <-
+  tracts_2010 %>% 
+  filter(STATEFP10 == "06") %>% # Limit to California Census tracts
+  select(GEOID = GEOID10) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(sit209_points %>% filter(REPORT_YEAR == 2010))
+
+sit209_tracts_2011 <-
+  tracts_2011 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(sit209_points %>% filter(REPORT_YEAR == 2011))
+
+sit209_tracts_2012 <-
+  tracts_2012 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>%  
+  st_intersection(sit209_points %>% filter(REPORT_YEAR == 2012))
+
+sit209_tracts_2013 <-
+  tracts_2013 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(sit209_points %>% filter(REPORT_YEAR == 2013))
+
+sit209_tracts_2014 <-
+  tracts_2014 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(sit209_points %>% filter(REPORT_YEAR == 2014))
+
+sit209_tracts_2015 <-
+  tracts_2015 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(sit209_points %>% filter(REPORT_YEAR == 2015))
+
+sit209_tracts_2016 <-
+  tracts_2016 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(sit209_points %>% filter(REPORT_YEAR == 2016))
+
+sit209_tracts_2017 <-
+  tracts_2017 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_intersection(sit209_points %>% filter(REPORT_YEAR == 2017))
+
+```
+
+NOW WE PUT IT ALL TOGETHER.
+
+```{r}
+sit209_tracts <-
+  rbind(
+    sit209_tracts_2000,
+    sit209_tracts_2010,
+    sit209_tracts_2011,
+    sit209_tracts_2012,
+    sit209_tracts_2013,
+    sit209_tracts_2014,
+    sit209_tracts_2015,
+    sit209_tracts_2016,
+    sit209_tracts_2017
+  )
+```
+
+The problem is that this tibble excludes so many points, and I'm not sure why. I guess they're just not in the tracts? That doesn't seem true. Something funny is happening.
+
+Adding a buffer does not help:
+
+```{r}
+sit209_points %>% 
+  filter(REPORT_YEAR == 2017) %>% 
+  st_buffer(100) %>% 
+  st_intersection(
+    tracts_2017 %>% 
+    filter(STATEFP == "06") %>% # Limit to California Census tracts
+    select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+    st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+    st_make_valid()
+  )
+```
+
+Maybe it's the intersection that isn't working. Here's st_within:
+
+```{r}
+sit209_points %>% 
+  filter(REPORT_YEAR == 2017) %>% 
+  st_within(
+    tracts_2017 %>% 
+    filter(STATEFP == "06") %>% # Limit to California Census tracts
+    select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+    st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+    st_make_valid()
+  )
+```
+
+This did not work. How about st_contains?
+
+```{r}
+tracts_2017 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  st_join(sit209_points %>% filter(REPORT_YEAR == 2017), join = st_contains) %>% 
+  drop_na(REPORT_YEAR)
+```
+
+Same darn result.
+
+How about st_is_within_distance?
+
+```{r}
+tracts_2017 %>% 
+  filter(STATEFP == "06") %>% # Limit to California Census tracts
+  select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+  st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+  st_make_valid() %>% 
+  mutate(centroid = st_centroid(geometry)) %>% 
+  st_join(
+    sit209_points %>% filter(REPORT_YEAR == 2017), 
+    join = st_is_within_distance, dist = 100
+  ) %>% 
+  drop_na(REPORT_YEAR)
+
+```
+
+This didn't work either. Let's try a slightly different test:
+
+```{r}
+
+st_is_within_distance(
+  x = 
+    tracts_2017 %>% 
+      filter(STATEFP == "06") %>% # Limit to California Census tracts
+      select(GEOID) %>% # Selects and renames only the GEOID and the geometry column
+      st_transform(crs = 3310) %>% # Makes it a California Albers, like the FRAP data.
+      st_make_valid() %>% 
+      mutate(centroid = st_centroid(geometry)),
+  y = sit209_points %>% filter(REPORT_YEAR == 2017),
+  dist = 100
+) %>%
+as_tibble()   
+
+```
+
+This also did not work.
+
+```{r}
+frap_tracts_distinct %>% 
+  st_drop_geometry() %>%
+  mutate(
+    YEAR_ = as.character(YEAR_),
+    ALARM_DATE = str_remove(ALARM_DATE, " 00:00:00"),
+    ALARM_DATE = parse_date(ALARM_DATE, format = "%Y-%m-%d"),
+    alarm_month = lubridate::month(ALARM_DATE)
+  ) %>% 
+  left_join(
+    sit209_tracts %>% 
+      st_drop_geometry() %>% 
+      mutate(report_month = lubridate::month(REPORT_DATE)),
+    by = c("GEOID", "YEAR_" = "REPORT_YEAR", "alarm_month" = "report_month")
+  ) %>% 
+  drop_na(DESTROYED)
+```
+
+This outcome is really disappointing. Let's try something else.
